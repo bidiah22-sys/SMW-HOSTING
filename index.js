@@ -1,482 +1,954 @@
+
 "use strict";
 
-const express = require("express");
+/*
+ * ╔══════════════════════════════════════════════╗
+ * ║             SMW HOSTING 🚩                   ║
+ * ║       Telegram Hosting Management Bot       ║
+ * ╚══════════════════════════════════════════════╝
+ *
+ * Node.js 20+
+ * Render Web Service
+ */
+
 const { Telegraf, Markup } = require("telegraf");
+const express = require("express");
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
-const { exec } = require("child_process");
+const crypto = require("crypto");
 
-// ======================================================
-//                  𝗦𝗠𝗪 𝗖𝗢𝗡𝗙𝗜𝗚𝗨𝗥𝗔𝗧𝗜𝗢𝗡
-// ======================================================
+// =================================================
+// CONFIGURATION
+// =================================================
 
 const BOT_TOKEN = "9018432626:AAEzE-we9BzMCQyOrRlC_4TSPWx8VuQfyEk";
-// Admin username / identifier set to fx_sidhu (ab tu /admin command chalayega to access mil jayega)
-const ADMIN_USERNAME = "fx_sidhu"; 
+
+const ADMIN_USERNAME = "fx_sidhu";
+const ADMIN_TELEGRAM_ID = Number(process.env.ADMIN_TELEGRAM_ID || 0);
+
 const PORT = Number(process.env.PORT) || 3000;
-const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB Max
-const EXECUTION_TIMEOUT = 15_000; // 15 Seconds Timeout
-
-if (!BOT_TOKEN) {
-  console.error("[𝗦𝗠𝗪 FATAL] BOT_TOKEN is missing!");
-  process.exit(1);
-}
-
-const bot = new Telegraf(BOT_TOKEN);
-const app = express();
-
-app.disable("x-powered-by");
-app.use(express.json({ limit: "32kb" }));
-
-// ======================================================
-//        LIGHTWEIGHT JSON DATABASE (RENDER SAFE)
-// ======================================================
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
 const DATA_DIR = path.join(__dirname, "data");
-fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
-const DB_FILE = path.join(DATA_DIR, "users.json");
+const PROJECT_DIR = path.join(__dirname, "projects");
 
-function loadDB() {
-  try {
-    if (fs.existsSync(DB_FILE)) {
-      return JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
+const DB_FILE = path.join(DATA_DIR, "database.json");
+
+const app = express();
+
+app.use(express.json({ limit: "32kb" }));
+
+if (
+    !BOT_TOKEN ||
+    BOT_TOKEN === "PASTE_YOUR_NEW_BOT_TOKEN_HERE"
+) {
+    console.error("SMW HOSTING: Add your new BOT_TOKEN in index.js");
+    process.exit(1);
+}
+
+// =================================================
+// DIRECTORIES
+// =================================================
+
+for (const dir of [DATA_DIR, PROJECT_DIR]) {
+    if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
     }
-  } catch (err) {
-    console.error("[𝗦𝗠𝗪 DB] Load error:", err.message);
-  }
-  return { users: {}, totalExecutions: 0 };
 }
 
-function saveDB(data) {
-  try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), "utf8");
-  } catch (err) {
-    console.error("[𝗦𝗠𝗪 DB] Save error:", err.message);
-  }
-}
+// =================================================
+// DATABASE
+// =================================================
 
-function rememberUser(user) {
-  const db = loadDB();
-  const userId = String(user.id);
-  const now = new Date().toISOString();
-  const displayName = [user.first_name, user.last_name].filter(Boolean).join(" ") || "Telegram User";
-
-  if (!db.users[userId]) {
-    db.users[userId] = {
-      first_name: displayName,
-      username: user.username || null,
-      first_seen: now,
-      last_seen: now,
-      executions: 0
+function defaultDatabase() {
+    return {
+        users: {},
+        projects: {},
+        executions: 0,
+        startedAt: new Date().toISOString()
     };
-  } else {
-    db.users[userId].first_name = displayName;
-    db.users[userId].username = user.username || null;
-    db.users[userId].last_seen = now;
-  }
-  saveDB(db);
 }
 
-function incrementExecution(userId) {
-  const db = loadDB();
-  if (db.users[String(userId)]) {
-    db.users[String(userId)].executions = (db.users[String(userId)].executions || 0) + 1;
-  }
-  db.totalExecutions = (db.totalExecutions || 0) + 1;
-  saveDB(db);
+function loadDatabase() {
+    try {
+        if (!fs.existsSync(DB_FILE)) {
+            return defaultDatabase();
+        }
+
+        const data = JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
+
+        return {
+            ...defaultDatabase(),
+            ...data
+        };
+    } catch (error) {
+        console.error("Database read error:", error.message);
+        return defaultDatabase();
+    }
 }
 
-// ======================================================
-//                  RUNTIME STATE & LOGS
-// ======================================================
+let db = loadDatabase();
+
+let saveQueue = Promise.resolve();
+
+function saveDatabase() {
+    const snapshot = JSON.stringify(db, null, 2);
+
+    saveQueue = saveQueue
+        .then(async () => {
+            const tempFile = DB_FILE + ".tmp";
+            await fs.promises.writeFile(tempFile, snapshot);
+            await fs.promises.rename(tempFile, DB_FILE);
+        })
+        .catch(error => {
+            console.error("Database save error:", error.message);
+        });
+
+    return saveQueue;
+}
+
+// =================================================
+// BOT
+// =================================================
+
+const bot = new Telegraf(BOT_TOKEN);
 
 const activeUsers = new Map();
 const crashLogs = [];
 
-function logError(label, error) {
-  const entry = {
-    time: new Date().toISOString(),
-    label,
-    message: String(error?.stack || error).slice(0, 2000)
-  };
-  console.error(`[𝗦𝗠𝗪] ${label}:`, entry.message);
-  crashLogs.push(entry);
-  if (crashLogs.length > 100) crashLogs.shift();
+let botStartedAt = Date.now();
+let botReady = false;
+
+function logError(error) {
+    const entry = {
+        time: new Date().toISOString(),
+        message: String(error?.stack || error)
+    };
+
+    crashLogs.unshift(entry);
+
+    if (crashLogs.length > 100) {
+        crashLogs.pop();
+    }
+
+    console.error(entry.message);
+}
+
+function smw(text) {
+    return text;
 }
 
 function isAdmin(ctx) {
-  const username = ctx.from?.username;
-  // Agar username 'fx_sidhu' hai ya fir environment variable match karta hai
-  return (username && username.toLowerCase() === ADMIN_USERNAME.toLowerCase()) || 
-         (process.env.ADMIN_TELEGRAM_ID && String(ctx.from?.id) === String(process.env.ADMIN_TELEGRAM_ID));
+    const user = ctx.from;
+
+    if (!user) return false;
+
+    const username = String(user.username || "").toLowerCase();
+
+    return (
+        username === ADMIN_USERNAME.toLowerCase() ||
+        (ADMIN_TELEGRAM_ID !== 0 &&
+            Number(user.id) === ADMIN_TELEGRAM_ID)
+    );
 }
 
-function escapeHTML(value = "") {
-  return String(value).replace(/[&<>"']/g, char => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;"
-  })[char]);
+function getUser(ctx) {
+    const id = String(ctx.from.id);
+
+    if (!db.users[id]) {
+        db.users[id] = {
+            id: ctx.from.id,
+            username: ctx.from.username || "",
+            firstName: ctx.from.first_name || "",
+            language: ctx.from.language_code || "unknown",
+            joinedAt: new Date().toISOString(),
+            uploads: 0,
+            projects: [],
+            lastSeen: new Date().toISOString()
+        };
+    }
+
+    const user = db.users[id];
+
+    user.username = ctx.from.username || user.username;
+    user.firstName = ctx.from.first_name || user.firstName;
+    user.lastSeen = new Date().toISOString();
+
+    return user;
 }
 
-function displayName(user) {
-  return [user.first_name, user.last_name].filter(Boolean).join(" ") || "Telegram User";
+function userProjects(userId) {
+    return Object.values(db.projects).filter(
+        project => String(project.ownerId) === String(userId)
+    );
 }
 
-function removeDirectory(directory) {
-  if (!directory) return;
-  try {
-    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
-  } catch (err) {
-    logError("Cleanup warning", err);
-  }
+function projectStatus(project) {
+    return project.status || "ANALYSIS_PENDING";
 }
 
-function isPrivateChat(ctx) {
-  return ctx.chat?.type === "private";
+// =================================================
+// KEYBOARDS
+// =================================================
+
+function mainMenu(admin = false) {
+    const rows = [
+        [
+            Markup.button.callback("📤 UPLOAD PROJECT", "upload"),
+            Markup.button.callback("📁 MY PROJECTS", "myprojects")
+        ],
+        [
+            Markup.button.callback("👤 MY PROFILE", "profile"),
+            Markup.button.callback("💻 LANGUAGES", "languages")
+        ],
+        [
+            Markup.button.callback("📖 HELP & GUIDE", "help"),
+            Markup.button.callback("🔄 REFRESH", "home")
+        ]
+    ];
+
+    if (admin) {
+        rows.push([
+            Markup.button.callback("👑 DEVELOPER PANEL", "admin")
+        ]);
+    }
+
+    return Markup.inlineKeyboard(rows);
 }
 
-async function safeCallback(ctx, message = "") {
-  try {
-    await ctx.answerCbQuery(message);
-  } catch (_) {}
+function adminMenu() {
+    return Markup.inlineKeyboard([
+        [
+            Markup.button.callback("📊 MASTER STATS", "admin_stats"),
+            Markup.button.callback("🖥 SERVICE STATUS", "admin_status")
+        ],
+        [
+            Markup.button.callback("👥 ALL USERS", "admin_users"),
+            Markup.button.callback("📁 ALL PROJECTS", "admin_projects")
+        ],
+        [
+            Markup.button.callback("📜 CRASH LOGS", "admin_logs"),
+            Markup.button.callback("🔄 REFRESH", "admin")
+        ],
+        [
+            Markup.button.callback("🏠 HOME", "home")
+        ]
+    ]);
 }
 
-// ======================================================
-//                     𝗦𝗠𝗪 𝗞𝗘𝗬𝗕𝗢𝗔𝗥𝗗𝗦
-// ======================================================
+function backButton(target = "home") {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback("⬅️ BACK", target)]
+    ]);
+}
 
-const HOME_KEYBOARD = Markup.inlineKeyboard([
-  [Markup.button.callback("📂 𝗨𝗣𝗟𝗢𝗔𝗗 𝗖𝗢𝗗𝗘 & 𝗥𝗨𝗡", "upload")],
-  [Markup.button.callback("👤 𝗠𝗬 𝗣𝗥𝗢𝗙𝗜𝗟𝗘", "profile"), Markup.button.callback("⚙️ 𝗟𝗔𝗡𝗚𝗨𝗔𝗚𝗘𝗦", "languages")],
-  [Markup.button.callback("🛠️ 𝗛𝗘𝗟𝗣 & 𝗚𝗨𝗜𝗗𝗘", "help")],
-  [Markup.button.callback("🔄 𝗥𝗘𝗙𝗥𝗘𝗦𝗛 𝗠𝗘𝗡𝗨", "home")]
-]);
-
-const BACK_KEYBOARD = Markup.inlineKeyboard([
-  [Markup.button.callback("🏠 𝗠𝗔𝗜𝗡 𝗠𝗘𝗡𝗨", "home")]
-]);
-
-const ADMIN_KEYBOARD = Markup.inlineKeyboard([
-  [Markup.button.callback("📊 𝗠𝗔𝗦𝗧𝗘𝗥 𝗦𝗧𝗔𝗧𝗦", "admin_stats")],
-  [Markup.button.callback("🖥️ 𝗦𝗘𝗥𝗩𝗜𝗖𝗘 𝗦𝗧𝗔𝗧𝗨𝗦", "admin_status")],
-  [Markup.button.callback("📜 𝗖𝗥𝗔𝗦𝗛 𝗟𝗢𝗚𝗦", "admin_logs")],
-  [Markup.button.callback("🏠 𝗠𝗔𝗜𝗡 𝗠𝗘𝗡𝗨", "home")]
-]);
-
-// ======================================================
-//                     HOME & MENUS
-// ======================================================
+// =================================================
+// HOME
+// =================================================
 
 async function showHome(ctx, edit = false) {
-  const user = ctx.from;
-  const message =
-`🎀 <b>𝗪𝗘𝗟𝗖𝗢𝗠𝗘 𝗧𝗢 𝗦𝗠𝗪 𝗖𝗢𝗗𝗘 𝗛𝗨𝗕 🚩</b>
+    const user = getUser(ctx);
+    await saveDatabase();
 
-Hello, <b>${escapeHTML(displayName(user))}</b>!
-Your private code execution workspace is ready.
+    const admin = isAdmin(ctx);
 
-👤 <b>Name:</b> ${escapeHTML(displayName(user))}
-🔖 <b>Username:</b> ${user.username ? "@" + escapeHTML(user.username) : "Not Set"}
-🆔 <b>User ID:</b> <code>${user.id}</code>
+    const message =
+        "🎀 SMW HOSTING 🚩\n\n" +
+        "Welcome to SMW Hosting Management.\n\n" +
+        `👤 User: ${user.firstName || "User"}\n` +
+        `🆔 ID: ${user.id}\n` +
+        `📁 Your Projects: ${userProjects(user.id).length}\n\n` +
+        "Select an option below.";
 
-⚡ <b>𝗔𝗩𝗔𝗜𝗟𝗔𝗕𝗟𝗘 𝗥𝗨𝗡𝗧𝗜𝗠𝗘𝗦</b>
-• JavaScript (.js)
-• Python 3 (.py)
+    if (edit && ctx.callbackQuery) {
+        return ctx.editMessageText(
+            message,
+            mainMenu(admin)
+        ).catch(() => ctx.reply(message, mainMenu(admin)));
+    }
 
-<b>𝗣𝗢𝗪𝗘𝗥𝗘𝗗 𝗕𝗬 𝗦𝗠𝗪 🚩</b>`;
-
-  if (edit && ctx.callbackQuery?.message) {
-    return ctx.editMessageText(message, { parse_mode: "HTML", ...HOME_KEYBOARD });
-  }
-  return ctx.reply(message, { parse_mode: "HTML", ...HOME_KEYBOARD });
+    return ctx.reply(message, mainMenu(admin));
 }
 
 bot.start(async ctx => {
-  if (!isPrivateChat(ctx)) return ctx.reply("🔐 Please open a private chat with SMW Bot.");
-  rememberUser(ctx.from);
-  await showHome(ctx);
+    try {
+        await showHome(ctx);
+    } catch (error) {
+        logError(error);
+        await ctx.reply("SMW HOSTING: Unable to open menu.");
+    }
 });
 
 bot.action("home", async ctx => {
-  await safeCallback(ctx);
-  if (!isPrivateChat(ctx)) return;
-  await showHome(ctx, true);
+    await ctx.answerCbQuery();
+    await showHome(ctx, true);
 });
+
+// =================================================
+// PROFILE
+// =================================================
 
 bot.action("profile", async ctx => {
-  await safeCallback(ctx);
-  const user = ctx.from;
-  const db = loadDB();
-  const record = db.users[String(user.id)];
-  const message =
-`👤 <b>𝗬𝗢𝗨𝗥 𝗣𝗥𝗢𝗙𝗜𝗟𝗘</b>
+    await ctx.answerCbQuery();
 
-🧑 <b>Name:</b> ${escapeHTML(displayName(user))}
-🔖 <b>Username:</b> ${user.username ? "@" + escapeHTML(user.username) : "Not Set"}
-🆔 <b>Telegram ID:</b> <code>${user.id}</code>
+    const user = getUser(ctx);
+    const projects = userProjects(user.id);
 
-📅 <b>Joined:</b> ${escapeHTML(record?.first_seen || "Unknown")}
-🚀 <b>Executions:</b> ${record?.executions || 0}
+    const message =
+        "👤 MY PROFILE\n\n" +
+        `Name: ${user.firstName || "Not available"}\n` +
+        `Username: @${user.username || "Not set"}\n` +
+        `Telegram ID: ${user.id}\n` +
+        `Language: ${user.language}\n` +
+        `Joined: ${user.joinedAt}\n` +
+        `Total Uploads: ${user.uploads}\n` +
+        `My Projects: ${projects.length}`;
 
-🚩 <b>𝗦𝗠𝗪 𝗛𝗢𝗦𝗧𝗜𝗡𝗚 𝗨𝗦𝗘𝗥</b>`;
-
-  await ctx.editMessageText(message, { parse_mode: "HTML", ...BACK_KEYBOARD });
+    await ctx.editMessageText(message, backButton());
 });
+
+// =================================================
+// LANGUAGES
+// =================================================
 
 bot.action("languages", async ctx => {
-  await safeCallback(ctx);
-  await ctx.editMessageText(
-`⚙️ <b>𝗦𝗨𝗣𝗣𝗢𝗥𝗧𝗘𝗗 𝗟𝗔𝗡𝗚𝗨𝗔𝗚𝗘𝗦</b>
+    await ctx.answerCbQuery();
 
-🟨 <b>𝗝𝗮𝘃𝗮𝗦𝗰𝗿𝗶𝗽𝘁 (.𝗷𝘀)</b> — Node.js
-🐍 <b>𝗣𝘆𝘁𝗵𝗼𝗻 (.𝗽𝘆)</b> — Python 3
-
-📦 <b>Max file size:</b> 10 MB
-⏱ <b>Execution timeout:</b> 15 seconds
-
-<b>𝗣𝗢𝗪𝗘𝗥𝗘𝗗 𝗕𝗬 𝗦𝗠𝗪 🚩</b>`,
-    { parse_mode: "HTML", ...BACK_KEYBOARD }
-  );
+    await ctx.editMessageText(
+        "💻 SUPPORTED PROJECT TYPES\n\n" +
+        "🟢 Node.js — package.json detection\n" +
+        "🟢 Python — requirements.txt detection\n" +
+        "🟢 Python — pyproject.toml detection\n" +
+        "🟢 Static Website — HTML/CSS/JS detection\n" +
+        "🟡 ZIP — project archive inspection required\n" +
+        "🟡 Other files — safe storage only\n\n" +
+        "Note: Detection does not mean the project is deployed.",
+        backButton()
+    );
 });
+
+// =================================================
+// HELP
+// =================================================
 
 bot.action("help", async ctx => {
-  await safeCallback(ctx);
-  await ctx.editMessageText(
-`🛠️ <b>𝗦𝗠𝗪 𝗛𝗘𝗟𝗣 & 𝗚𝗨𝗜𝗗𝗘</b>
+    await ctx.answerCbQuery();
 
-1️⃣ Click on <b>𝗨𝗣𝗟𝗢𝗔𝗗 𝗖𝗢𝗗𝗘 & 𝗥𝗨𝗡</b>.
-2️⃣ Send your <code>.js</code> or <code>.py</code> file as a Document.
-3️⃣ SMW executes it securely in an isolated workspace.
-4️⃣ Get your output instantly!
-
-<b>𝗣𝗢𝗪𝗘𝗥𝗘𝗗 𝗕𝗬 𝗦𝗠𝗪 🚩</b>`,
-    { parse_mode: "HTML", ...BACK_KEYBOARD }
-  );
+    await ctx.editMessageText(
+        "📖 SMW HOSTING — HELP CENTER\n\n" +
+        "1. Select UPLOAD PROJECT.\n" +
+        "2. Send your project file.\n" +
+        "3. The bot downloads and inspects the file.\n" +
+        "4. Project type and configuration are detected.\n" +
+        "5. Missing configuration can be requested.\n" +
+        "6. Check the project in MY PROJECTS.\n\n" +
+        "Important:\n" +
+        "This version stores and inspects projects. " +
+        "It does not execute arbitrary uploaded code or " +
+        "provide independent 24/7 project hosting yet.\n\n" +
+        "Maximum upload size: 10 MB.",
+        backButton()
+    );
 });
+
+// =================================================
+// UPLOAD FLOW
+// =================================================
 
 bot.action("upload", async ctx => {
-  await safeCallback(ctx);
-  await ctx.editMessageText(
-`📂 <b>𝗨𝗣𝗟𝗢𝗔𝗗 𝗖𝗢𝗗𝗘 & 𝗥𝗨𝗡</b>
+    await ctx.answerCbQuery();
 
-Send your file directly in this private chat.
-✅ <code>.js</code> — JavaScript
-✅ <code>.py</code> — Python
+    activeUsers.set(ctx.from.id, {
+        mode: "waiting_for_project"
+    });
 
-📦 Maximum: 10 MB
-⏱ Timeout: 15 seconds
-
-<b>𝗦𝗠𝗪 𝗜𝗦 𝗥𝗘𝗗𝗬 🚩</b>`,
-    { parse_mode: "HTML", ...BACK_KEYBOARD }
-  );
+    await ctx.editMessageText(
+        "📤 PROJECT UPLOAD\n\n" +
+        "Send your project file as a Telegram document.\n\n" +
+        "Maximum size: 10 MB\n" +
+        "Supported inspection: JS, Python, HTML, JSON, ZIP and other files.\n\n" +
+        "The bot will inspect the file and identify missing configuration.",
+        backButton()
+    );
 });
 
-// ======================================================
-//                  ADMIN PANEL COMMANDS
-// ======================================================
+function detectProjectType(filename) {
+    const lower = filename.toLowerCase();
+
+    if (lower.endsWith(".zip")) return "ZIP ARCHIVE";
+    if (lower.endsWith(".js") || lower.endsWith(".mjs") || lower.endsWith(".cjs")) return "NODE.JS";
+    if (lower.endsWith(".py")) return "PYTHON";
+    if (lower.endsWith(".html") || lower.endsWith(".htm")) return "STATIC WEBSITE";
+    if (lower.endsWith(".json")) return "JSON FILE";
+    if (lower.endsWith(".css")) return "CSS FILE";
+
+    return "UNKNOWN FILE TYPE";
+}
+
+async function downloadTelegramFile(fileId, destination) {
+    const fileInfo = await bot.telegram.getFile(fileId);
+
+    if (!fileInfo.file_path) {
+        throw new Error("Telegram file path unavailable.");
+    }
+
+    const url =
+        `https://api.telegram.org/file/bot${BOT_TOKEN}/${fileInfo.file_path}`;
+
+    const response = await axios.get(url, {
+        responseType: "stream",
+        timeout: 60000,
+        maxContentLength: MAX_FILE_SIZE
+    });
+
+    const contentLength = Number(response.headers["content-length"] || 0);
+
+    if (contentLength > MAX_FILE_SIZE) {
+        response.data.destroy();
+        throw new Error("File exceeds 10 MB limit.");
+    }
+
+    let received = 0;
+
+    await new Promise((resolve, reject) => {
+        const output = fs.createWriteStream(destination);
+
+        response.data.on("data", chunk => {
+            received += chunk.length;
+
+            if (received > MAX_FILE_SIZE) {
+                response.data.destroy(
+                    new Error("File exceeds 10 MB limit.")
+                );
+            }
+        });
+
+        response.data.on("error", reject);
+        output.on("error", reject);
+        output.on("finish", resolve);
+
+        response.data.pipe(output);
+    });
+
+    return received;
+}
+
+async function inspectProject(filePath, filename) {
+    const result = {
+        type: detectProjectType(filename),
+        filename,
+        detectedFiles: [],
+        requirements: [],
+        startupCommand: null,
+        status: "ANALYSIS_PENDING"
+    };
+
+    // Inspect package.json without executing it.
+    if (filename.toLowerCase() === "package.json") {
+        const content = await fs.promises.readFile(filePath, "utf8");
+        const pkg = JSON.parse(content);
+
+        result.detectedFiles.push("package.json");
+        result.requirements = Object.keys(pkg.dependencies || {});
+        result.startupCommand =
+            pkg.scripts?.start || pkg.main || null;
+
+        result.status = "CONFIGURATION_DETECTED";
+    }
+
+    // Inspect Python dependency file.
+    if (filename.toLowerCase() === "requirements.txt") {
+        const content = await fs.promises.readFile(filePath, "utf8");
+
+        result.detectedFiles.push("requirements.txt");
+        result.requirements = content
+            .split(/\r?\n/)
+            .map(line => line.trim())
+            .filter(line => line && !line.startsWith("#"));
+
+        result.status = "CONFIGURATION_DETECTED";
+    }
+
+    if (filename.toLowerCase() === "pyproject.toml") {
+        result.detectedFiles.push("pyproject.toml");
+        result.status = "CONFIGURATION_DETECTED";
+    }
+
+    if (filename.toLowerCase() === "index.html") {
+        result.detectedFiles.push("index.html");
+        result.status = "STATIC_PROJECT_DETECTED";
+    }
+
+    return result;
+}
+
+bot.on("document", async ctx => {
+    const user = getUser(ctx);
+    const state = activeUsers.get(ctx.from.id);
+
+    if (!state || state.mode !== "waiting_for_project") {
+        return ctx.reply(
+            "Please open UPLOAD PROJECT before sending a file.",
+            mainMenu(isAdmin(ctx))
+        );
+    }
+
+    const document = ctx.message.document;
+    const filename = path.basename(document.file_name || "upload.bin");
+
+    if (document.file_size && document.file_size > MAX_FILE_SIZE) {
+        return ctx.reply("❌ File too large. Maximum allowed size is 10 MB.");
+    }
+
+    const projectId = crypto.randomBytes(5).toString("hex");
+    const userFolder = path.join(PROJECT_DIR, String(ctx.from.id));
+
+    await fs.promises.mkdir(userFolder, { recursive: true });
+
+    const destination = path.join(userFolder, projectId + "_" + filename);
+
+    const statusMessage = await ctx.reply(
+        "⏳ UPLOAD STARTED\n\n" +
+        "Please wait while SMW Hosting receives your file..."
+    );
+
+    try {
+        await ctx.telegram.editMessageText(
+            ctx.chat.id,
+            statusMessage.message_id,
+            undefined,
+            "⏳ DOWNLOADING FILE...\n\nPlease wait."
+        );
+
+        const received = await downloadTelegramFile(
+            document.file_id,
+            destination
+        );
+
+        await ctx.telegram.editMessageText(
+            ctx.chat.id,
+            statusMessage.message_id,
+            undefined,
+            "✅ UPLOAD COMPLETE: 100%\n\n🔍 Inspecting project..."
+        );
+
+        const inspection = await inspectProject(destination, filename);
+
+        const project = {
+            id: projectId,
+            ownerId: ctx.from.id,
+            ownerUsername: ctx.from.username || "",
+            filename,
+            filePath: path.relative(__dirname, destination),
+            size: received,
+            type: inspection.type,
+            requirements: inspection.requirements,
+            detectedFiles: inspection.detectedFiles,
+            startupCommand: inspection.startupCommand,
+            status: inspection.status,
+            createdAt: new Date().toISOString(),
+            logs: [
+                {
+                    time: new Date().toISOString(),
+                    message: "File uploaded and inspected."
+                }
+            ]
+        };
+
+        db.projects[projectId] = project;
+        user.uploads = Number(user.uploads || 0) + 1;
+        user.projects.push(projectId);
+
+        await saveDatabase();
+
+        activeUsers.delete(ctx.from.id);
+
+        const requirements =
+            inspection.requirements.length
+                ? inspection.requirements.join(", ")
+                : "No dependencies detected";
+
+        await ctx.telegram.editMessageText(
+            ctx.chat.id,
+            statusMessage.message_id,
+            undefined,
+            "🎀 SMW HOSTING — UPLOAD REPORT\n\n" +
+            "✅ Upload: 100% Complete\n" +
+            `📁 File: ${filename}\n` +
+            `🆔 Project ID: ${projectId}\n` +
+            `📦 Size: ${(received / 1024).toFixed(2)} KB\n` +
+            `💻 Type: ${inspection.type}\n` +
+            `📌 Status: ${inspection.status}\n\n` +
+            `📚 Detected requirements:\n${requirements}\n\n` +
+            "Your project has been saved successfully.\n" +
+            "Actual hosting deployment requires a separate isolated runtime."
+        );
+
+    } catch (error) {
+        logError(error);
+
+        activeUsers.delete(ctx.from.id);
+
+        await ctx.telegram.editMessageText(
+            ctx.chat.id,
+            statusMessage.message_id,
+            undefined,
+            "❌ UPLOAD FAILED\n\n" +
+            "Reason: " + error.message
+        ).catch(() => {});
+    }
+});
+
+// =================================================
+// MY PROJECTS
+// =================================================
+
+bot.action("myprojects", async ctx => {
+    await ctx.answerCbQuery();
+
+    const projects = userProjects(ctx.from.id);
+
+    if (!projects.length) {
+        return ctx.editMessageText(
+            "📁 MY PROJECTS\n\nNo projects uploaded yet.",
+            backButton()
+        );
+    }
+
+    const buttons = projects.map(project => [
+        Markup.button.callback(
+            `${project.filename} — ${project.status}`,
+            `project_${project.id}`
+        )
+    ]);
+
+    buttons.push([
+        Markup.button.callback("⬅️ BACK", "home")
+    ]);
+
+    await ctx.editMessageText(
+        "📁 MY PROJECTS\n\nSelect a project to view details.",
+        Markup.inlineKeyboard(buttons)
+    );
+});
+
+bot.action(/^project_([a-f0-9]+)$/, async ctx => {
+    await ctx.answerCbQuery();
+
+    const id = ctx.match[1];
+    const project = db.projects[id];
+
+    if (!project) {
+        return ctx.reply("Project not found.");
+    }
+
+    if (
+        String(project.ownerId) !== String(ctx.from.id) &&
+        !isAdmin(ctx)
+    ) {
+        return ctx.reply("⛔ Access denied.");
+    }
+
+    const message =
+        "📁 PROJECT DETAILS\n\n" +
+        `Name: ${project.filename}\n` +
+        `ID: ${project.id}\n` +
+        `Type: ${project.type}\n` +
+        `Status: ${projectStatus(project)}\n` +
+        `Size: ${(project.size / 1024).toFixed(2)} KB\n` +
+        `Created: ${project.createdAt}\n` +
+        `Startup: ${project.startupCommand || "Not detected"}\n\n` +
+        "Deployment is not active in this version.";
+
+    await ctx.editMessageText(
+        message,
+        Markup.inlineKeyboard([
+            [
+                Markup.button.callback("📜 PROJECT LOGS", `projectlogs_${id}`)
+            ],
+            [
+                Markup.button.callback("⬅️ MY PROJECTS", "myprojects")
+            ]
+        ])
+    );
+});
+
+bot.action(/^projectlogs_([a-f0-9]+)$/, async ctx => {
+    await ctx.answerCbQuery();
+
+    const project = db.projects[ctx.match[1]];
+
+    if (!project) return ctx.reply("Project not found.");
+
+    if (
+        String(project.ownerId) !== String(ctx.from.id) &&
+        !isAdmin(ctx)
+    ) {
+        return ctx.reply("⛔ Access denied.");
+    }
+
+    const logs = (project.logs || [])
+        .slice(-10)
+        .map(log => `${log.time}\n${log.message}`)
+        .join("\n\n");
+
+    await ctx.reply(
+        "📜 PROJECT LOGS\n\n" + (logs || "No logs available.")
+    );
+});
+
+// =================================================
+// ADMIN PANEL
+// =================================================
 
 bot.command("admin", async ctx => {
-  if (!isAdmin(ctx)) return ctx.reply("⛔ Access denied. Only @fx_sidhu can access this panel.");
-  await ctx.reply("👑 <b>𝗦𝗠𝗪 𝗗𝗘𝗩𝗘𝗟𝗢𝗣𝗘𝗥 𝗣𝗔𝗡𝗘𝗟</b>\n\nWelcome back, <b>fx_sidhu</b>! Full administrative access granted.", { parse_mode: "HTML", ...ADMIN_KEYBOARD });
+    if (!isAdmin(ctx)) {
+        return ctx.reply("⛔ ADMIN ACCESS DENIED.");
+    }
+
+    await ctx.reply(
+        "👑 SMW DEVELOPER CONTROL PANEL\n\nSelect a control:",
+        adminMenu()
+    );
+});
+
+bot.action("admin", async ctx => {
+    await ctx.answerCbQuery();
+
+    if (!isAdmin(ctx)) {
+        return ctx.reply("⛔ ADMIN ACCESS DENIED.");
+    }
+
+    await ctx.editMessageText(
+        "👑 SMW DEVELOPER CONTROL PANEL\n\nSelect a control:",
+        adminMenu()
+    );
 });
 
 bot.action("admin_stats", async ctx => {
-  if (!isAdmin(ctx)) return safeCallback(ctx, "Access denied.");
-  await safeCallback(ctx);
-  const db = loadDB();
-  const totalUsers = Object.keys(db.users).length;
-  const message =
-`📊 <b>𝗦𝗠𝗪 𝗠𝗔𝗦𝗧𝗘𝗥 𝗦𝗧𝗔𝗧𝗦</b>
+    await ctx.answerCbQuery();
 
-👥 <b>Total Users:</b> ${totalUsers}
-🚀 <b>Total Executions:</b> ${db.totalExecutions || 0}
-⚙️ <b>Active Executions:</b> ${activeUsers.size}
-📜 <b>Error Records:</b> ${crashLogs.length}
+    if (!isAdmin(ctx)) return ctx.reply("⛔ Access denied.");
 
-👑 <b>ADMIN: fx_sidhu</b>`;
+    const users = Object.keys(db.users).length;
+    const projects = Object.keys(db.projects).length;
 
-  await ctx.editMessageText(message, { parse_mode: "HTML", ...ADMIN_KEYBOARD });
+    await ctx.editMessageText(
+        "📊 MASTER STATISTICS\n\n" +
+        `👥 Total Users: ${users}\n` +
+        `📁 Total Projects: ${projects}\n` +
+        `📤 Total Uploads: ${db.executions}\n` +
+        `🖥 Server Platform: ${process.platform}\n` +
+        `🟢 Bot Ready: ${botReady ? "YES" : "NO"}\n` +
+        `⏱ Uptime: ${Math.floor(process.uptime())} seconds`,
+        backButton("admin")
+    );
 });
 
 bot.action("admin_status", async ctx => {
-  if (!isAdmin(ctx)) return safeCallback(ctx, "Access denied.");
-  await safeCallback(ctx);
-  const message =
-`🖥️ <b>𝗦𝗠𝗪 𝗦𝗘𝗥𝗩𝗜𝗖𝗘 𝗦𝗧𝗔𝗧𝗨𝗦</b>
+    await ctx.answerCbQuery();
 
-🟢 Bot process: Running
-🟢 Express: Running
-⚙️ Active executions: ${activeUsers.size}
-📦 File persistence: JSON Storage (Render Safe)
+    if (!isAdmin(ctx)) return ctx.reply("⛔ Access denied.");
 
-👑 <b>DEVELOPER: fx_sidhu</b>`;
+    const memory = process.memoryUsage();
 
-  await ctx.editMessageText(message, { parse_mode: "HTML", ...ADMIN_KEYBOARD });
+    await ctx.editMessageText(
+        "🖥 SERVICE STATUS\n\n" +
+        `Bot: ${botReady ? "ONLINE" : "STARTING"}\n` +
+        `Node: ${process.version}\n` +
+        `Platform: ${process.platform}\n` +
+        `CPU Cores: ${os.cpus().length}\n` +
+        `System RAM: ${(os.totalmem() / 1024 / 1024).toFixed(0)} MB\n` +
+        `Free RAM: ${(os.freemem() / 1024 / 1024).toFixed(0)} MB\n` +
+        `Process RAM: ${(memory.rss / 1024 / 1024).toFixed(2)} MB\n` +
+        `Process Uptime: ${Math.floor(process.uptime())} seconds`,
+        backButton("admin")
+    );
+});
+
+bot.action("admin_users", async ctx => {
+    await ctx.answerCbQuery();
+
+    if (!isAdmin(ctx)) return ctx.reply("⛔ Access denied.");
+
+    const users = Object.values(db.users);
+
+    const list = users.slice(0, 30).map(user =>
+        `👤 ${user.firstName || "User"}\n` +
+        `ID: ${user.id}\n` +
+        `Username: @${user.username || "none"}`
+    ).join("\n\n");
+
+    await ctx.editMessageText(
+        "👥 REGISTERED USERS\n\n" +
+        (list || "No users registered."),
+        backButton("admin")
+    );
+});
+
+bot.action("admin_projects", async ctx => {
+    await ctx.answerCbQuery();
+
+    if (!isAdmin(ctx)) return ctx.reply("⛔ Access denied.");
+
+    const projects = Object.values(db.projects);
+
+    const list = projects.slice(0, 30).map(project =>
+        `📁 ${project.filename}\n` +
+        `ID: ${project.id}\n` +
+        `Owner: ${project.ownerId}\n` +
+        `Status: ${project.status}`
+    ).join("\n\n");
+
+    await ctx.editMessageText(
+        "📁 ALL PROJECTS\n\n" +
+        (list || "No projects available."),
+        backButton("admin")
+    );
 });
 
 bot.action("admin_logs", async ctx => {
-  if (!isAdmin(ctx)) return safeCallback(ctx, "Access denied.");
-  await safeCallback(ctx);
-  const recent = crashLogs.slice(-10);
-  const logText = recent.length ? recent.map((item, idx) => `${idx + 1}. ${item.time}\n${item.label}: ${item.message}`).join("\n\n") : "No recent errors.";
-  await ctx.reply(`<b>📜 𝗦𝗠𝗪 𝗥𝗘𝗖𝗘𝗡𝗧 𝗘𝗥𝗥𝗢𝗥 𝗟𝗢𝗚𝗦</b>\n\n<pre>${escapeHTML(logText.slice(0, 3500))}</pre>`, { parse_mode: "HTML" });
-});
+    await ctx.answerCbQuery();
 
-// ======================================================
-//        BULLETPROOF SAFE EXECUTION ENGINE
-// ======================================================
+    if (!isAdmin(ctx)) return ctx.reply("⛔ Access denied.");
 
-bot.on("document", async ctx => {
-  if (!isPrivateChat(ctx)) {
-    return ctx.reply("🔐 For privacy, please upload files in the bot's private chat.");
-  }
+    const logs = crashLogs.slice(0, 10)
+        .map(log => `${log.time}\n${log.message}`)
+        .join("\n\n");
 
-  const userId = String(ctx.from.id);
-  const document = ctx.message.document;
-  if (!document) return ctx.reply("❌ No document detected.");
-
-  const filename = path.basename(document.file_name || "code.txt");
-  const extension = path.extname(filename).toLowerCase();
-
-  if (document.file_size && document.file_size > MAX_FILE_SIZE) {
-    return ctx.reply("❌ File size exceeds the 10 MB limit.");
-  }
-
-  if (![".js", ".py"].includes(extension)) {
-    return ctx.reply("❌ Unsupported format! Only <code>.js</code> and <code>.py</code> files are supported.", { parse_mode: "HTML" });
-  }
-
-  if (activeUsers.has(userId)) {
-    return ctx.reply("⏳ You already have an active execution running. Please wait.");
-  }
-
-  activeUsers.set(userId, true);
-  let jobDirectory = null;
-  let statusMsg = null;
-
-  try {
-    statusMsg = await ctx.reply(
-`⏳ <b>𝗦𝗠𝗪 𝗘𝗫𝗘𝗖𝗨𝗧𝗜𝗢𝗡 𝗦𝗧𝗔𝗥𝗧𝗘𝗗</b>
-
-📄 File: <code>${escapeHTML(filename)}</code>
-⚙️ Downloading file safely...`,
-      { parse_mode: "HTML" }
+    await ctx.editMessageText(
+        "📜 CRASH LOGS\n\n" +
+        (logs || "No crash logs recorded."),
+        backButton("admin")
     );
-
-    const fileUrl = await ctx.telegram.getFileLink(document.file_id);
-    const fileResponse = await axios.get(fileUrl.href, { responseType: "arraybuffer", timeout: 25000 });
-
-    jobDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "smw-sec-"));
-    fs.chmodSync(jobDirectory, 0o700);
-
-    const localFile = path.join(jobDirectory, extension === ".js" ? "main.js" : "main.py");
-    fs.writeFileSync(localFile, fileResponse.data, { mode: 0o400 });
-
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMsg.message_id,
-      undefined,
-      `⏳ <b>𝗦𝗠𝗪 𝗘𝗫𝗘𝗖𝗨𝗧𝗜𝗢𝗡 𝗦𝗧𝗔𝗥𝗧𝗘𝗗</b>\n\n📄 File: <code>${escapeHTML(filename)}</code>\n⚙️ Running code in sandbox...`,
-      { parse_mode: "HTML" }
-    ).catch(() => {});
-
-    const cmd = extension === ".js" ? `node "${localFile}"` : `python3 "${localFile}"`;
-
-    exec(cmd, { timeout: EXECUTION_TIMEOUT, maxBuffer: 1024 * 1024 * 2 }, (error, stdout, stderr) => {
-      removeDirectory(jobDirectory);
-      activeUsers.delete(userId);
-      rememberUser(ctx.from);
-      incrementExecution(userId);
-
-      const status = error ? "𝗙𝗔𝗜𝗟𝗘𝗗 / 𝗧𝗜𝗠𝗘𝗢𝗨𝗧" : "𝗦𝗨𝗖𝗖𝗘𝗦𝗦";
-      let result = `🚀 <b>𝗦𝗠𝗪 𝗘𝗫𝗘𝗖𝗨𝗧𝗜𝗢𝗡 𝗥𝗘𝗦𝗨𝗟𝗧</b>\n\n📄 <b>𝗙𝗶𝗹𝗲:</b> ${escapeHTML(filename)}\n📊 <b>𝗦𝘁𝗮𝘁𝘂𝘀:</b> ${status}\n\n`;
-
-      if (stdout) {
-        result += `📤 <b>𝗦𝗧𝗗𝗢𝗨𝗧</b>\n<pre>${escapeHTML(stdout.slice(0, 3000))}</pre>\n\n`;
-      }
-      if (stderr) {
-        result += `⚠️ <b>𝗦𝗧𝗗𝗘𝗥𝗥</b>\n<pre>${escapeHTML(stderr.slice(0, 2500))}</pre>\n\n`;
-      }
-      if (!stdout && !stderr && !error) {
-        result += `✅ Executed successfully with no output.\n\n`;
-      }
-      if (error && !stderr) {
-        result += `❌ <b>𝗘𝗿𝗿𝗼𝗿:</b>\n<pre>${escapeHTML(error.message)}</pre>\n\n`;
-      }
-
-      result += `<b>𝗣𝗢𝗪𝗘𝗥𝗘𝗗 𝗕𝗬 𝗦𝗠𝗪 🚩</b>`;
-
-      ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, result, {
-        parse_mode: "HTML",
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback("📂 𝗥𝗨𝗡 𝗔𝗡𝗢𝗧𝗛𝗘𝗥", "upload")],
-          [Markup.button.callback("🏠 𝗠𝗔𝗜𝗡 𝗠𝗘𝗡𝗨", "home")]
-        ])
-      }).catch(err => logError("Edit message", err));
-    });
-
-  } catch (err) {
-    removeDirectory(jobDirectory);
-    activeUsers.delete(userId);
-    logError("Document execution", err);
-
-    const errorText = `❌ <b>𝗘𝗫𝗘𝗖𝗨𝗧𝗜𝗢𝗡 𝗙𝗔𝗜𝗟𝗘𝗗</b>\n\n${escapeHTML(err.message)}`;
-    if (statusMsg) {
-      ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, errorText, { parse_mode: "HTML" }).catch(() => {});
-    } else {
-      ctx.reply(errorText, { parse_mode: "HTML" }).catch(() => {});
-    }
-  }
 });
 
-// ======================================================
-//       CRASH-PROOF GLOBAL ERROR HANDLERS
-// ======================================================
+// =================================================
+// COMMANDS
+// =================================================
 
-bot.catch((err, ctx) => {
-  logError(`Telegram update ${ctx.update?.update_id}`, err);
+bot.command("help", async ctx => {
+    await ctx.reply(
+        "SMW HOSTING COMMANDS\n\n" +
+        "/start - Open main menu\n" +
+        "/help - Help center\n" +
+        "/admin - Developer panel\n" +
+        "/status - Bot status\n" +
+        "/projects - Your projects"
+    );
 });
 
-process.on("unhandledRejection", (reason) => {
-  logError("Unhandled Rejection", reason);
+bot.command("status", async ctx => {
+    await ctx.reply(
+        `SMW HOSTING: ${botReady ? "ONLINE" : "STARTING"}\n` +
+        `Uptime: ${Math.floor(process.uptime())} seconds`
+    );
 });
 
-process.on("uncaughtException", (err) => {
-  logError("Uncaught Exception", err);
+bot.command("projects", async ctx => {
+    const projects = userProjects(ctx.from.id);
+
+    await ctx.reply(
+        "YOUR PROJECTS\n\n" +
+        (projects.map(p => `${p.filename} — ${p.status}`).join("\n") ||
+            "No projects yet.")
+    );
 });
 
-// ======================================================
-//        EXPRESS 24/7 KEEP-ALIVE & SELF-Ping
-// ======================================================
+// =================================================
+// WEB SERVER
+// =================================================
 
 app.get("/", (req, res) => {
-  res.status(200).send("🚀 SMW Bot Active 24/7");
+    res.status(200).send(
+        "🎀 SMW HOSTING 🚩 — Telegram Hosting Management Bot"
+    );
 });
 
 app.get("/health", (req, res) => {
-  res.status(200).json({ status: "healthy", service: "SMW-Bot", admin: "fx_sidhu" });
+    res.status(200).json({
+        status: "online",
+        service: "SMW HOSTING",
+        botReady,
+        uptime: process.uptime(),
+        timestamp: new Date().toISOString()
+    });
 });
+
+// =================================================
+// RENDER SELF PING — PRESERVED
+// =================================================
+
+const SELF_URL =
+    process.env.RENDER_EXTERNAL_URL ||
+    `http://localhost:${PORT}`;
+
+setInterval(async () => {
+    try {
+        await axios.get(`${SELF_URL}/health`, {
+            timeout: 15000
+        });
+    } catch (error) {
+        console.error("SMW self-ping error:", error.message);
+    }
+}, 9 * 60 * 1000);
+
+// =================================================
+// ERROR HANDLING
+// =================================================
+
+bot.catch((error, ctx) => {
+    logError(error);
+    console.error("Telegram update error:", ctx?.update?.update_id);
+});
+
+process.on("unhandledRejection", reason => {
+    logError(reason);
+});
+
+process.on("uncaughtException", error => {
+    logError(error);
+});
+
+// =================================================
+// START SERVER + BOT
+// =================================================
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`[𝗦𝗠𝗪] Server running smoothly on port ${PORT}`);
-  
-  // 🚀 AUTOMATIC SELF-PING SYSTEM (Prevents Render 15-minute sleep)
-  const RENDER_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
-  setInterval(() => {
-    axios.get(`${RENDER_URL}/health`)
-      .then(() => console.log("[𝗦𝗠𝗪 Self-Ping] Server kept alive successfully!"))
-      .catch((err) => console.log("[𝗦𝗠𝗪 Self-Ping] Ping skipped:", err.message));
-  }, 9 * 60 * 1000); // Har 9 minute mein khud ko ping karega
+    console.log(`SMW HOSTING web server running on ${PORT}`);
 });
 
-bot.launch().then(() => {
-  console.log("[𝗦𝗠𝗪] Telegram bot successfully launched and crash-proof!");
-});
+(async () => {
+    try {
+        await bot.launch();
+        botReady = true;
+        botStartedAt = Date.now();
 
-process.once("SIGINT", () => bot.stop("SIGINT"));
-process.once("SIGTERM", () => bot.stop("SIGTERM"));
+        console.log("SMW HOSTING Telegram bot is online.");
+    } catch (error) {
+        botReady = false;
+        logError(error);
+        process.exit(1);
+    }
+})();
+
+async function shutdown(signal) {
+    console.log(`Received ${signal}. Shutting down...`);
+
+    botReady = false;
+
+    try {
+        bot.stop(signal);
+    } catch (error) {
+        logError(error);
+    }
+
+    await saveDatabase();
+
+    process.exit(0);
+}
+
+process.once("SIGINT", () => shutdown("SIGINT"));
+process.once("SIGTERM", () => shutdown("SIGTERM"));
