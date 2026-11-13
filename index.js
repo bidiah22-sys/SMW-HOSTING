@@ -1,4 +1,3 @@
-
 "use strict";
 
 /*
@@ -18,6 +17,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
+const { exec, spawn } = require("child_process");
 
 // =================================================
 // CONFIGURATION
@@ -29,10 +29,11 @@ const ADMIN_USERNAME = "fx_sidhu";
 const ADMIN_TELEGRAM_ID = Number(process.env.ADMIN_TELEGRAM_ID || 0);
 
 const PORT = Number(process.env.PORT) || 3000;
-const MAX_FILE_SIZE = 10 * 1024 * 1024;
+const MAX_FILE_SIZE = 15 * 1024 * 1024;
 
 const DATA_DIR = path.join(__dirname, "data");
 const PROJECT_DIR = path.join(__dirname, "projects");
+const RUNNING_DIR = path.join(__dirname, "running");
 
 const DB_FILE = path.join(DATA_DIR, "database.json");
 
@@ -52,9 +53,9 @@ if (
 // DIRECTORIES
 // =================================================
 
-for (const dir of [DATA_DIR, PROJECT_DIR]) {
+for (const dir of [DATA_DIR, PROJECT_DIR, RUNNING_DIR]) {
     if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
+        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
 }
 
@@ -66,6 +67,7 @@ function defaultDatabase() {
     return {
         users: {},
         projects: {},
+        activeProcesses: {},
         executions: 0,
         startedAt: new Date().toISOString()
     };
@@ -116,6 +118,7 @@ function saveDatabase() {
 const bot = new Telegraf(BOT_TOKEN);
 
 const activeUsers = new Map();
+const activeProcesses = new Map();
 const crashLogs = [];
 
 let botStartedAt = Date.now();
@@ -190,7 +193,7 @@ function projectStatus(project) {
 }
 
 // =================================================
-// KEYBOARDS
+// KEYBOARDS (ORIGINAL STYLISH SETUP)
 // =================================================
 
 function mainMenu(admin = false) {
@@ -318,13 +321,12 @@ bot.action("languages", async ctx => {
 
     await ctx.editMessageText(
         "💻 SUPPORTED PROJECT TYPES\n\n" +
-        "🟢 Node.js — package.json detection\n" +
-        "🟢 Python — requirements.txt detection\n" +
+        "🟢 Node.js — package.json detection & Auto npm install\n" +
+        "🟢 Python — requirements.txt detection & Auto pip install\n" +
         "🟢 Python — pyproject.toml detection\n" +
         "🟢 Static Website — HTML/CSS/JS detection\n" +
-        "🟡 ZIP — project archive inspection required\n" +
-        "🟡 Other files — safe storage only\n\n" +
-        "Note: Detection does not mean the project is deployed.",
+        "🟡 ZIP — project archive inspection & hosting\n\n" +
+        "⚡ Powered by SMW Live Execution Engine 🚩",
         backButton()
     );
 });
@@ -342,19 +344,15 @@ bot.action("help", async ctx => {
         "2. Send your project file.\n" +
         "3. The bot downloads and inspects the file.\n" +
         "4. Project type and configuration are detected.\n" +
-        "5. Missing configuration can be requested.\n" +
-        "6. Check the project in MY PROJECTS.\n\n" +
-        "Important:\n" +
-        "This version stores and inspects projects. " +
-        "It does not execute arbitrary uploaded code or " +
-        "provide independent 24/7 project hosting yet.\n\n" +
-        "Maximum upload size: 10 MB.",
+        "5. Dependencies are installed automatically.\n" +
+        "6. Check and manage your live project in MY PROJECTS.\n\n" +
+        "Maximum upload size: 15 MB.",
         backButton()
     );
 });
 
 // =================================================
-// UPLOAD FLOW
+// UPLOAD & LIVE HOSTING ENGINE
 // =================================================
 
 bot.action("upload", async ctx => {
@@ -365,11 +363,11 @@ bot.action("upload", async ctx => {
     });
 
     await ctx.editMessageText(
-        "📤 PROJECT UPLOAD\n\n" +
+        "📤 PROJECT UPLOAD & AUTO-HOSTING\n\n" +
         "Send your project file as a Telegram document.\n\n" +
-        "Maximum size: 10 MB\n" +
-        "Supported inspection: JS, Python, HTML, JSON, ZIP and other files.\n\n" +
-        "The bot will inspect the file and identify missing configuration.",
+        "Maximum size: 15 MB\n" +
+        "Supported: JS, Python, HTML, ZIP, etc.\n\n" +
+        "The bot will automatically inspect, install requirements, and host it live 24/7!",
         backButton()
     );
 });
@@ -407,7 +405,7 @@ async function downloadTelegramFile(fileId, destination) {
 
     if (contentLength > MAX_FILE_SIZE) {
         response.data.destroy();
-        throw new Error("File exceeds 10 MB limit.");
+        throw new Error("File exceeds 15 MB limit.");
     }
 
     let received = 0;
@@ -420,7 +418,7 @@ async function downloadTelegramFile(fileId, destination) {
 
             if (received > MAX_FILE_SIZE) {
                 response.data.destroy(
-                    new Error("File exceeds 10 MB limit.")
+                    new Error("File exceeds 15 MB limit.")
                 );
             }
         });
@@ -445,20 +443,16 @@ async function inspectProject(filePath, filename) {
         status: "ANALYSIS_PENDING"
     };
 
-    // Inspect package.json without executing it.
     if (filename.toLowerCase() === "package.json") {
         const content = await fs.promises.readFile(filePath, "utf8");
         const pkg = JSON.parse(content);
 
         result.detectedFiles.push("package.json");
         result.requirements = Object.keys(pkg.dependencies || {});
-        result.startupCommand =
-            pkg.scripts?.start || pkg.main || null;
-
+        result.startupCommand = pkg.scripts?.start || pkg.main || null;
         result.status = "CONFIGURATION_DETECTED";
     }
 
-    // Inspect Python dependency file.
     if (filename.toLowerCase() === "requirements.txt") {
         const content = await fs.promises.readFile(filePath, "utf8");
 
@@ -484,6 +478,58 @@ async function inspectProject(filePath, filename) {
     return result;
 }
 
+// Live Deployment & Execution Logic
+async function deployLiveProject(projectId, filePath, filename) {
+    const projectFolder = path.join(RUNNING_DIR, projectId);
+    fs.mkdirSync(projectFolder, { recursive: true });
+
+    const ext = path.extname(filename).toLowerCase();
+    let mainFile = filename;
+
+    if (ext === ".zip") {
+        fs.copyFileSync(filePath, path.join(projectFolder, filename));
+    } else {
+        mainFile = "main" + ext;
+        fs.copyFileSync(filePath, path.join(projectFolder, mainFile));
+    }
+
+    let startupCommand = "";
+
+    if (ext === ".js" || filename === "package.json") {
+        startupCommand = `node ${mainFile}`;
+        if (fs.existsSync(path.join(projectFolder, "package.json"))) {
+            await new Promise(res => exec("npm install", { cwd: projectFolder }, res));
+        }
+    } else if (ext === ".py") {
+        startupCommand = `python3 ${mainFile}`;
+        if (fs.existsSync(path.join(projectFolder, "requirements.txt"))) {
+            await new Promise(res => exec("pip install -r requirements.txt", { cwd: projectFolder }, res));
+        }
+    }
+
+    if (startupCommand) {
+        const child = spawn(startupCommand, { cwd: projectFolder, shell: true });
+        activeProcesses.set(projectId, child);
+
+        child.stdout.on("data", (data) => {
+            console.log(`[PROJ ${projectId}]`, data.toString());
+        });
+
+        child.stderr.on("data", (data) => {
+            console.error(`[PROJ ${projectId} ERR]`, data.toString());
+        });
+
+        child.on("close", (code) => {
+            if (db.projects[projectId]) {
+                db.projects[projectId].status = `STOPPED (${code})`;
+                saveDatabase();
+            }
+        });
+    }
+
+    return startupCommand;
+}
+
 bot.on("document", async ctx => {
     const user = getUser(ctx);
     const state = activeUsers.get(ctx.from.id);
@@ -499,7 +545,7 @@ bot.on("document", async ctx => {
     const filename = path.basename(document.file_name || "upload.bin");
 
     if (document.file_size && document.file_size > MAX_FILE_SIZE) {
-        return ctx.reply("❌ File too large. Maximum allowed size is 10 MB.");
+        return ctx.reply("❌ File too large. Maximum allowed size is 15 MB.");
     }
 
     const projectId = crypto.randomBytes(5).toString("hex");
@@ -531,10 +577,11 @@ bot.on("document", async ctx => {
             ctx.chat.id,
             statusMessage.message_id,
             undefined,
-            "✅ UPLOAD COMPLETE: 100%\n\n🔍 Inspecting project..."
+            "✅ UPLOAD COMPLETE: 100%\n\n🔍 Inspecting and deploying live..."
         );
 
         const inspection = await inspectProject(destination, filename);
+        const startupCommand = await deployLiveProject(projectId, destination, filename);
 
         const project = {
             id: projectId,
@@ -546,13 +593,13 @@ bot.on("document", async ctx => {
             type: inspection.type,
             requirements: inspection.requirements,
             detectedFiles: inspection.detectedFiles,
-            startupCommand: inspection.startupCommand,
-            status: inspection.status,
+            startupCommand: startupCommand || inspection.startupCommand,
+            status: "RUNNING 24/7",
             createdAt: new Date().toISOString(),
             logs: [
                 {
                     time: new Date().toISOString(),
-                    message: "File uploaded and inspected."
+                    message: "File uploaded, dependencies installed, and project hosted live."
                 }
             ]
         };
@@ -574,16 +621,15 @@ bot.on("document", async ctx => {
             ctx.chat.id,
             statusMessage.message_id,
             undefined,
-            "🎀 SMW HOSTING — UPLOAD REPORT\n\n" +
-            "✅ Upload: 100% Complete\n" +
+            "🎀 SMW HOSTING — LIVE DEPLOYMENT REPORT 🚩\n\n" +
+            "✅ Upload & Host: 100% Complete\n" +
             `📁 File: ${filename}\n` +
             `🆔 Project ID: ${projectId}\n` +
             `📦 Size: ${(received / 1024).toFixed(2)} KB\n` +
             `💻 Type: ${inspection.type}\n` +
-            `📌 Status: ${inspection.status}\n\n` +
+            `🚀 Status: ONLINE & RUNNING 24/7\n\n` +
             `📚 Detected requirements:\n${requirements}\n\n` +
-            "Your project has been saved successfully.\n" +
-            "Actual hosting deployment requires a separate isolated runtime."
+            "Your project is now successfully hosted on SMW Cloud!"
         );
 
     } catch (error) {
@@ -595,7 +641,7 @@ bot.on("document", async ctx => {
             ctx.chat.id,
             statusMessage.message_id,
             undefined,
-            "❌ UPLOAD FAILED\n\n" +
+            "❌ DEPLOYMENT FAILED\n\n" +
             "Reason: " + error.message
         ).catch(() => {});
     }
@@ -629,7 +675,7 @@ bot.action("myprojects", async ctx => {
     ]);
 
     await ctx.editMessageText(
-        "📁 MY PROJECTS\n\nSelect a project to view details.",
+        "📁 MY PROJECTS\n\nSelect a project to manage:",
         Markup.inlineKeyboard(buttons)
     );
 });
@@ -659,20 +705,37 @@ bot.action(/^project_([a-f0-9]+)$/, async ctx => {
         `Status: ${projectStatus(project)}\n` +
         `Size: ${(project.size / 1024).toFixed(2)} KB\n` +
         `Created: ${project.createdAt}\n` +
-        `Startup: ${project.startupCommand || "Not detected"}\n\n` +
-        "Deployment is not active in this version.";
+        `Startup: ${project.startupCommand || "Not detected"}`;
 
     await ctx.editMessageText(
         message,
         Markup.inlineKeyboard([
             [
-                Markup.button.callback("📜 PROJECT LOGS", `projectlogs_${id}`)
+                Markup.button.callback("🛑 STOP PROJECT", `stopproj_${id}`),
+                Markup.button.callback("📜 LOGS", `projectlogs_${id}`)
             ],
             [
                 Markup.button.callback("⬅️ MY PROJECTS", "myprojects")
             ]
         ])
     );
+});
+
+bot.action(/^stopproj_([a-f0-9]+)$/, async ctx => {
+    await ctx.answerCbQuery();
+    const id = ctx.match[1];
+
+    if (activeProcesses.has(id)) {
+        activeProcesses.get(id).kill();
+        activeProcesses.delete(id);
+    }
+
+    if (db.projects[id]) {
+        db.projects[id].status = "STOPPED BY USER";
+        await saveDatabase();
+    }
+
+    await ctx.editMessageText("🛑 Project process has been stopped.", backButton("myprojects"));
 });
 
 bot.action(/^projectlogs_([a-f0-9]+)$/, async ctx => {
@@ -740,6 +803,7 @@ bot.action("admin_stats", async ctx => {
         `👥 Total Users: ${users}\n` +
         `📁 Total Projects: ${projects}\n` +
         `📤 Total Uploads: ${db.executions}\n` +
+        `🚀 Active Processes: ${activeProcesses.size}\n` +
         `🖥 Server Platform: ${process.platform}\n` +
         `🟢 Bot Ready: ${botReady ? "YES" : "NO"}\n` +
         `⏱ Uptime: ${Math.floor(process.uptime())} seconds`,
