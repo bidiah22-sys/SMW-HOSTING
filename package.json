@@ -1,7 +1,8 @@
+
 {
-  "name": "smw-ultimate-bot",
-  "version": "5.0.0",
-  "description": "SMW Ultimate Telegram Execution Bot",
+  "name": "smw-hosting",
+  "version": "6.0.0",
+  "description": "SMW Hosting Telegram Management Bot",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
