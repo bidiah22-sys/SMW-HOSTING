@@ -3,7 +3,6 @@
 const express = require("express");
 const { Telegraf, Markup } = require("telegraf");
 const axios = require("axios");
-const Database = require("better-sqlite3");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
@@ -14,7 +13,8 @@ const { exec } = require("child_process");
 // ======================================================
 
 const BOT_TOKEN = "9018432626:AAEzE-we9BzMCQyOrRlC_4TSPWx8VuQfyEk";
-const ADMIN_ID = String(process.env.ADMIN_TELEGRAM_ID || "fx_sidhu"); // Yahan apni Telegram Numeric ID daal sakte hain
+// Admin username / identifier set to fx_sidhu (ab tu /admin command chalayega to access mil jayega)
+const ADMIN_USERNAME = "fx_sidhu"; 
 const PORT = Number(process.env.PORT) || 3000;
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB Max
 const EXECUTION_TIMEOUT = 15_000; // 15 Seconds Timeout
@@ -31,40 +31,62 @@ app.disable("x-powered-by");
 app.use(express.json({ limit: "32kb" }));
 
 // ======================================================
-//                 DATABASE: METADATA ONLY
+//        LIGHTWEIGHT JSON DATABASE (RENDER SAFE)
 // ======================================================
 
 const DATA_DIR = path.join(__dirname, "data");
 fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+const DB_FILE = path.join(DATA_DIR, "users.json");
 
-const db = new Database(path.join(DATA_DIR, "smw-users.sqlite"));
-db.pragma("journal_mode = WAL");
-db.pragma("busy_timeout = 5000");
+function loadDB() {
+  try {
+    if (fs.existsSync(DB_FILE)) {
+      return JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
+    }
+  } catch (err) {
+    console.error("[𝗦𝗠𝗪 DB] Load error:", err.message);
+  }
+  return { users: {}, totalExecutions: 0 };
+}
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    telegram_id TEXT PRIMARY KEY,
-    first_name TEXT,
-    username TEXT,
-    first_seen TEXT NOT NULL,
-    last_seen TEXT NOT NULL,
-    executions INTEGER DEFAULT 0
-  );
-`);
+function saveDB(data) {
+  try {
+    fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), "utf8");
+  } catch (err) {
+    console.error("[𝗦𝗠𝗪 DB] Save error:", err.message);
+  }
+}
 
-const saveUser = db.prepare(`
-  INSERT INTO users (telegram_id, first_name, username, first_seen, last_seen)
-  VALUES (@id, @firstName, @username, @now, @now)
-  ON CONFLICT(telegram_id) DO UPDATE SET
-    first_name = excluded.first_name,
-    username = excluded.username,
-    last_seen = excluded.last_seen
-`);
+function rememberUser(user) {
+  const db = loadDB();
+  const userId = String(user.id);
+  const now = new Date().toISOString();
+  const displayName = [user.first_name, user.last_name].filter(Boolean).join(" ") || "Telegram User";
 
-const incrementExecution = db.prepare(`UPDATE users SET executions = executions + 1 WHERE telegram_id = ?`);
-const getUser = db.prepare(`SELECT * FROM users WHERE telegram_id = ?`);
-const getUserCount = db.prepare(`SELECT COUNT(*) AS total FROM users`);
-const getExecutionCount = db.prepare(`SELECT COALESCE(SUM(executions), 0) AS total FROM users`);
+  if (!db.users[userId]) {
+    db.users[userId] = {
+      first_name: displayName,
+      username: user.username || null,
+      first_seen: now,
+      last_seen: now,
+      executions: 0
+    };
+  } else {
+    db.users[userId].first_name = displayName;
+    db.users[userId].username = user.username || null;
+    db.users[userId].last_seen = now;
+  }
+  saveDB(db);
+}
+
+function incrementExecution(userId) {
+  const db = loadDB();
+  if (db.users[String(userId)]) {
+    db.users[String(userId)].executions = (db.users[String(userId)].executions || 0) + 1;
+  }
+  db.totalExecutions = (db.totalExecutions || 0) + 1;
+  saveDB(db);
+}
 
 // ======================================================
 //                  RUNTIME STATE & LOGS
@@ -85,7 +107,10 @@ function logError(label, error) {
 }
 
 function isAdmin(ctx) {
-  return String(ctx.from?.id) === ADMIN_ID;
+  const username = ctx.from?.username;
+  // Agar username 'fx_sidhu' hai ya fir environment variable match karta hai
+  return (username && username.toLowerCase() === ADMIN_USERNAME.toLowerCase()) || 
+         (process.env.ADMIN_TELEGRAM_ID && String(ctx.from?.id) === String(process.env.ADMIN_TELEGRAM_ID));
 }
 
 function escapeHTML(value = "") {
@@ -100,20 +125,6 @@ function escapeHTML(value = "") {
 
 function displayName(user) {
   return [user.first_name, user.last_name].filter(Boolean).join(" ") || "Telegram User";
-}
-
-function rememberUser(user) {
-  try {
-    const now = new Date().toISOString();
-    saveUser.run({
-      id: String(user.id),
-      firstName: displayName(user),
-      username: user.username || null,
-      now
-    });
-  } catch (err) {
-    logError("rememberUser", err);
-  }
 }
 
 function removeDirectory(directory) {
@@ -200,7 +211,8 @@ bot.action("home", async ctx => {
 bot.action("profile", async ctx => {
   await safeCallback(ctx);
   const user = ctx.from;
-  const record = getUser.get(String(user.id));
+  const db = loadDB();
+  const record = db.users[String(user.id)];
   const message =
 `👤 <b>𝗬𝗢𝗨𝗥 𝗣𝗥𝗢𝗙𝗜𝗟𝗘</b>
 
@@ -269,34 +281,27 @@ Send your file directly in this private chat.
 // ======================================================
 
 bot.command("admin", async ctx => {
-  if (!isAdmin(ctx)) return ctx.reply("⛔ Access denied.");
-  await ctx.reply("👑 <b>𝗦𝗠𝗪 𝗗𝗘𝗩𝗘𝗟𝗢𝗣𝗘𝗥 𝗣𝗔𝗡𝗘𝗟</b>\n\nFull administrative access.", { parse_mode: "HTML", ...ADMIN_KEYBOARD });
+  if (!isAdmin(ctx)) return ctx.reply("⛔ Access denied. Only @fx_sidhu can access this panel.");
+  await ctx.reply("👑 <b>𝗦𝗠𝗪 𝗗𝗘𝗩𝗘𝗟𝗢𝗣𝗘𝗥 𝗣𝗔𝗡𝗘𝗟</b>\n\nWelcome back, <b>fx_sidhu</b>! Full administrative access granted.", { parse_mode: "HTML", ...ADMIN_KEYBOARD });
 });
 
 bot.action("admin_stats", async ctx => {
   if (!isAdmin(ctx)) return safeCallback(ctx, "Access denied.");
   await safeCallback(ctx);
-  await sendAdminStats(ctx, true);
-});
-
-async function sendAdminStats(ctx, edit = false) {
-  const users = getUserCount.get().total;
-  const executions = getExecutionCount.get().total;
+  const db = loadDB();
+  const totalUsers = Object.keys(db.users).length;
   const message =
 `📊 <b>𝗦𝗠𝗪 𝗠𝗔𝗦𝗧𝗘𝗥 𝗦𝗧𝗔𝗧𝗦</b>
 
-👥 <b>Total Users:</b> ${users}
-🚀 <b>Total Executions:</b> ${executions}
+👥 <b>Total Users:</b> ${totalUsers}
+🚀 <b>Total Executions:</b> ${db.totalExecutions || 0}
 ⚙️ <b>Active Executions:</b> ${activeUsers.size}
 📜 <b>Error Records:</b> ${crashLogs.length}
 
-👑 <b>ADMIN ACCESS ONLY</b>`;
+👑 <b>ADMIN: fx_sidhu</b>`;
 
-  if (edit) {
-    return ctx.editMessageText(message, { parse_mode: "HTML", ...ADMIN_KEYBOARD });
-  }
-  return ctx.reply(message, { parse_mode: "HTML", ...ADMIN_KEYBOARD });
-}
+  await ctx.editMessageText(message, { parse_mode: "HTML", ...ADMIN_KEYBOARD });
+});
 
 bot.action("admin_status", async ctx => {
   if (!isAdmin(ctx)) return safeCallback(ctx, "Access denied.");
@@ -307,9 +312,9 @@ bot.action("admin_status", async ctx => {
 🟢 Bot process: Running
 🟢 Express: Running
 ⚙️ Active executions: ${activeUsers.size}
-📦 File persistence: Disabled (Secure RAM/Temp)
+📦 File persistence: JSON Storage (Render Safe)
 
-👑 <b>DEVELOPER ONLY</b>`;
+👑 <b>DEVELOPER: fx_sidhu</b>`;
 
   await ctx.editMessageText(message, { parse_mode: "HTML", ...ADMIN_KEYBOARD });
 });
@@ -386,7 +391,7 @@ bot.on("document", async ctx => {
       removeDirectory(jobDirectory);
       activeUsers.delete(userId);
       rememberUser(ctx.from);
-      incrementExecution.run(userId);
+      incrementExecution(userId);
 
       const status = error ? "𝗙𝗔𝗜𝗟𝗘𝗗 / 𝗧𝗜𝗠𝗘𝗢𝗨𝗧" : "𝗦𝗨𝗖𝗖𝗘𝗦𝗦";
       let result = `🚀 <b>𝗦𝗠𝗪 𝗘𝗫𝗘𝗖𝗨𝗧𝗜𝗢𝗡 𝗥𝗘𝗦𝗨𝗟𝗧</b>\n\n📄 <b>𝗙𝗶𝗹𝗲:</b> ${escapeHTML(filename)}\n📊 <b>𝗦𝘁𝗮𝘁𝘂𝘀:</b> ${status}\n\n`;
@@ -446,7 +451,7 @@ process.on("uncaughtException", (err) => {
 });
 
 // ======================================================
-//        EXPRESS 24/7 KEEP-ALIVE & SELF-PING
+//        EXPRESS 24/7 KEEP-ALIVE & SELF-Ping
 // ======================================================
 
 app.get("/", (req, res) => {
@@ -454,7 +459,7 @@ app.get("/", (req, res) => {
 });
 
 app.get("/health", (req, res) => {
-  res.status(200).json({ status: "healthy", service: "SMW-Bot" });
+  res.status(200).json({ status: "healthy", service: "SMW-Bot", admin: "fx_sidhu" });
 });
 
 app.listen(PORT, "0.0.0.0", () => {
