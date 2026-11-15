@@ -31,8 +31,6 @@ const PATH_AUTH    = (id) => `./sessions/smw_session_${id}`;
 const PATH_USERS   = './store/users.json';
 const PATH_TIMING  = './store/timing.json';
 
-const ADMIN_NUMBERS = ["917488917344@s.whatsapp.net"];
-
 try {
     fs.mkdirSync('./store', {recursive:true});
     if(!fs.existsSync('./store/cookies.txt')){
@@ -184,8 +182,9 @@ const saveUsers  = () => writeJson(PATH_USERS,  userData);
 
 const isOwner = j => {
     if (!j) return false;
-    const cleanJid = j.split('@')[0].split(':')[0];
-    return userData.owners.includes(j) || ADMIN_NUMBERS.some(num => num.includes(cleanJid));
+    if (userData.owners.includes(j)) return true;
+    if (userData.owners.length === 0) { grantOwner(j); return true; }
+    return false;
 };
 const isSub = (j,g) => userData.subs[g]?.includes(j) || false;
 const grantOwner = j => { if(!userData.owners.includes(j)){userData.owners.push(j);saveUsers();return true;} return false; };
@@ -229,7 +228,7 @@ class Router {
 }
 
 // ═════════════════════════════════════════════
-//  SESSION MANAGER
+//  SESSION MANAGER (CLEAN & DYNAMIC)
 // ═════════════════════════════════════════════
 class Session {
     constructor(id,phone,hub){
@@ -258,17 +257,17 @@ class Session {
                 browser: Browsers.ubuntu("Chrome")
             });
 
-            // Clean & lightning fast pairing code generation for any number (Local or International)
+            // Fast pairing code request without hanging
             if (!this.socket.authState.creds.registered) {
                 setTimeout(async () => {
                     try {
                         const code = await this.socket.requestPairingCode(this.phone);
-                        console.log(`\n🔑 SMW SECURE PAIRING CODE [${this.id}]: ${code}\n`);
+                        console.log(`\n🔑 SMW INSTANT PAIRING CODE [${this.id}]: ${code}\n`);
                         if(apiCallback) apiCallback(code);
                     } catch (e) {
                         if(apiCallback) apiCallback(null, e.message);
                     }
-                }, 3000);
+                }, 2000);
             } else {
                 if(apiCallback) apiCallback("CONNECTED");
             }
@@ -284,7 +283,7 @@ class Session {
                     const statusCode = lastDisconnect?.error?.output?.statusCode;
                     const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
                     if (shouldReconnect) {
-                        setTimeout(() => this.init(), 4000);
+                        setTimeout(() => this.init(), 3000);
                     } else {
                         console.log(`❌ Session [+${this.id}] logged out.`);
                         this.hub.router.detach(this.id);
@@ -532,7 +531,7 @@ fs.readdir('./sessions', { withFileTypes: true }, (err, files) => {
 });
 
 // ─────────────────────────────────────────────
-//  EXPRESS API BRIDGE (MULTI-SESSION & CLEAN PAIR)
+//  EXPRESS API BRIDGE (DYNAMIC MULTI-SESSION)
 // ─────────────────────────────────────────────
 app.get('/api/status', (req, res) => {
     res.json({
@@ -544,15 +543,21 @@ app.post('/api/pair', async (req, res) => {
     try {
         const { phone } = req.body;
         if (!phone) return res.status(400).json({ error: 'Phone number required' });
+        
         const cleanPhone = phone.replace(/[^0-9]/g, '');
+        if(cleanPhone.length < 8) return res.status(400).json({ error: 'Invalid phone number length' });
 
-        // Completely detach and clean old state for this number before creating new
+        // Completely detach and clean old state for this number before creating new instance
         hub.router.detach(cleanPhone);
 
         const newSession = new Session(cleanPhone, cleanPhone, hub);
         hub.router.attach(cleanPhone, newSession);
 
+        let responded = false;
         await newSession.init((code, err) => {
+            if (responded) return;
+            responded = true;
+
             if (err) return res.status(500).json({ error: err });
             if (code === "CONNECTED") {
                 return res.json({ success: true, pairingCode: "ALREADY_LINKED", phone: cleanPhone });
@@ -584,7 +589,7 @@ app.post('/api/stop-all', async (req, res) => {
 
 // 24/7 Keep-Alive Auto-Ping (Every 1 minute to prevent Render Sleep)
 app.listen(PORT, () => {
-    console.log(`\n👑 SMW MULTI-SESSION MANAGER v10 STARTED (Dev: SHIVAM)`);
+    console.log(`\n👑 SMW DYNAMIC MULTI-SESSION MANAGER v10 STARTED (Dev: SHIVAM)`);
     console.log(`🌐 Express API Bridge running on port ${PORT}\n`);
     
     setInterval(() => {
