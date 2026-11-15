@@ -237,7 +237,7 @@ class Router {
 }
 
 // ═════════════════════════════════════════════
-//  SESSION MANAGER (SINGLE-CLICK KILLALL & ANTI-SPAM)
+//  SESSION MANAGER (ROBUST MESSAGE PARSER)
 // ═════════════════════════════════════════════
 class Session {
     constructor(id,phone,hub){
@@ -302,32 +302,46 @@ class Session {
                 }
             });
 
-            this.socket.ev.on('messages.upsert', m => this.receive(m));
+            // FIXED: Handling both upsert message structures for 100% command response
+            this.socket.ev.on('messages.upsert', async ({ messages }) => {
+                for (const raw of messages) {
+                    await this.receive(raw);
+                }
+            });
         } catch(e) {
             if(apiCallback) apiCallback(null, e.message);
         }
     }
 
-    async receive({messages,type}){
+    async receive(raw){
         try{
-            if(type!=='notify') return;
-            const raw = messages[0];
             if(!raw?.message) return;
-
-            // Prevent processing own outbound messages to avoid auto-reply loops
-            if(raw.key.fromMe) return;
+            if(raw.key.fromMe) return; // Ignore own outbound messages
 
             const chat    = raw.key.remoteJid;
+            if(!chat) return;
+
             const isGroup = chat.endsWith('@g.us');
             const sender  = raw.key.participant || chat;
 
             const msgId = raw.key.id;
             if(!this.hub.router.dedupe(msgId)) return;
 
-            const body = (raw.message.conversation
-                        ||raw.message.extendedTextMessage?.text
-                        ||raw.message.imageMessage?.caption||'').trim();
-            const cmd  = body.toLowerCase();
+            // Robust body extractor across all message types
+            const mContent = raw.message;
+            const body = (
+                mContent.conversation ||
+                mContent.extendedTextMessage?.text ||
+                mContent.imageMessage?.caption ||
+                mContent.videoMessage?.caption ||
+                mContent.templateButtonReplyMessage?.selectedId ||
+                ''
+            ).trim();
+
+            if(!body) return;
+            const cmd = body.toLowerCase();
+
+            console.log(`📩 [Session +${this.id}] Received from ${sender}: ${body}`);
 
             const isDM    = !isGroup;
             const isOwn   = isOwner(sender) || raw.key.fromMe;
@@ -339,7 +353,7 @@ class Session {
                 return;
             }
 
-            // INSTANT KILLALL TRIGGER (Single click global stop)
+            // INSTANT KILLALL TRIGGER
             if(cmd===`${PREFIX}killall` || cmd===`${PREFIX}ancstop` || cmd===`${PREFIX}stoptxt`){
                 await this.hub.router.pushAll('kill_all',{chat},this.id);
                 return;
@@ -453,7 +467,9 @@ class Session {
                 }
             }
 
-        } catch(e) {}
+        } catch(e) {
+            console.error("Receive error:", e);
+        }
     }
 
     async handle(cmd, payload, notify=true){
