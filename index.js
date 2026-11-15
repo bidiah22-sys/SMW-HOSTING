@@ -13,6 +13,7 @@ import makeWASocket, {
 import express from 'express';
 import cors from 'cors';
 import http from 'http';
+import https from 'https';
 import fs from 'fs';
 import pino from 'pino';
 
@@ -192,7 +193,7 @@ const grantOwner = j => { if(!userData.owners.includes(j)){userData.owners.push(
 const SET_KEYS = { anc1:'faces',anc2:'hearts',anc3:'hands',anc4:'flowers',anc5:'sky',anc6:'animals',anc7:'fruits' };
 
 // ═════════════════════════════════════════════
-//  ROUTER CLASS (MULTI-SESSION ISOLATION)
+//  ROUTER CLASS
 // ═════════════════════════════════════════════
 class Router {
     constructor(){
@@ -228,7 +229,7 @@ class Router {
 }
 
 // ═════════════════════════════════════════════
-//  SESSION MANAGER (CLEAN & DYNAMIC)
+//  SESSION MANAGER (ANTI-HANG & LIGHTNING FAST)
 // ═════════════════════════════════════════════
 class Session {
     constructor(id,phone,hub){
@@ -254,10 +255,11 @@ class Session {
                 version,
                 logger: pino({ level: "silent" }),
                 printQRInTerminal: false,
-                browser: Browsers.ubuntu("Chrome")
+                browser: Browsers.ubuntu("Chrome"),
+                syncFullHistory: false
             });
 
-            // Fast pairing code request without hanging
+            // Fast & stable pairing request without hanging
             if (!this.socket.authState.creds.registered) {
                 setTimeout(async () => {
                     try {
@@ -267,7 +269,7 @@ class Session {
                     } catch (e) {
                         if(apiCallback) apiCallback(null, e.message);
                     }
-                }, 2000);
+                }, 1000);
             } else {
                 if(apiCallback) apiCallback("CONNECTED");
             }
@@ -283,7 +285,7 @@ class Session {
                     const statusCode = lastDisconnect?.error?.output?.statusCode;
                     const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
                     if (shouldReconnect) {
-                        setTimeout(() => this.init(), 3000);
+                        setTimeout(() => this.init(), 2000);
                     } else {
                         console.log(`❌ Session [+${this.id}] logged out.`);
                         this.hub.router.detach(this.id);
@@ -547,7 +549,6 @@ app.post('/api/pair', async (req, res) => {
         const cleanPhone = phone.replace(/[^0-9]/g, '');
         if(cleanPhone.length < 8) return res.status(400).json({ error: 'Invalid phone number length' });
 
-        // Completely detach and clean old state for this number before creating new instance
         hub.router.detach(cleanPhone);
 
         const newSession = new Session(cleanPhone, cleanPhone, hub);
@@ -587,13 +588,16 @@ app.post('/api/stop-all', async (req, res) => {
     res.json({ success: true, message: 'All loops stopped.' });
 });
 
-// 24/7 Keep-Alive Auto-Ping (Every 1 minute to prevent Render Sleep)
+// 24/7 Keep-Alive Anti-Sleep Engine (Pings every 45 seconds using native http/https)
 app.listen(PORT, () => {
     console.log(`\n👑 SMW DYNAMIC MULTI-SESSION MANAGER v10 STARTED (Dev: SHIVAM)`);
     console.log(`🌐 Express API Bridge running on port ${PORT}\n`);
     
     setInterval(() => {
         const renderUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
-        http.get(`${renderUrl}/api/status`, () => {}).on('error', () => {});
-    }, 1 * 60 * 1000);
+        const client = renderUrl.startsWith('https') ? https : http;
+        client.get(`${renderUrl}/api/status`, (res) => {
+            res.on('data', () => {});
+        }).on('error', () => {});
+    }, 45 * 1000); // हर 45 सेकंड में खुद को जगाएगा
 });
