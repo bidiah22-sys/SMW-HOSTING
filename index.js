@@ -198,7 +198,8 @@ const SET_KEYS = { anc1:'faces',anc2:'hearts',anc3:'hands',anc4:'flowers',anc5:'
 class Router {
     constructor(){
         this.registry = new Map();
-        this.processed= new Set();
+        this.processed= new Map();
+        setInterval(()=>{ const n=Date.now(); for(const[k,v]of this.processed)if(n-v>90000)this.processed.delete(k); },90000);
     }
     attach(id,session){ this.registry.set(id,session); }
     detach(id) { 
@@ -209,16 +210,7 @@ class Router {
             try { fs.rmSync(PATH_AUTH(id), { recursive: true, force: true }); } catch(e){}
         }
     }
-    dedupe(msgId) {
-        if(!msgId) return true;
-        if(this.processed.has(msgId)) return false;
-        this.processed.add(msgId);
-        if(this.processed.size > 500) {
-            const firstItem = this.processed.values().next().value;
-            this.processed.delete(firstItem);
-        }
-        return true;
-    }
+    dedupe(msgId)     { if(this.processed.has(msgId))return false; this.processed.set(msgId,Date.now()); return true; }
     push(cmd,payload,fromId,notify=true){
         const alive=[...this.registry.values()].filter(s=>s.online);
         return Promise.all(alive.map(s=>s.handle(cmd,payload,s.id===fromId&&notify).catch(e=>{})));
@@ -237,7 +229,7 @@ class Router {
 }
 
 // ═════════════════════════════════════════════
-//  SESSION MANAGER (ROBUST MESSAGE PARSER)
+//  SESSION MANAGER (WORKING BASE + SINGLE-CLICK KILLALL + NO SHIVAM)
 // ═════════════════════════════════════════════
 class Session {
     constructor(id,phone,hub){
@@ -302,46 +294,28 @@ class Session {
                 }
             });
 
-            // FIXED: Handling both upsert message structures for 100% command response
-            this.socket.ev.on('messages.upsert', async ({ messages }) => {
-                for (const raw of messages) {
-                    await this.receive(raw);
-                }
-            });
+            this.socket.ev.on('messages.upsert', m => this.receive(m));
         } catch(e) {
             if(apiCallback) apiCallback(null, e.message);
         }
     }
 
-    async receive(raw){
+    async receive({messages,type}){
         try{
+            if(type!=='notify') return;
+            const raw = messages[0];
             if(!raw?.message) return;
-            if(raw.key.fromMe) return; // Ignore own outbound messages
 
             const chat    = raw.key.remoteJid;
-            if(!chat) return;
-
             const isGroup = chat.endsWith('@g.us');
             const sender  = raw.key.participant || chat;
 
-            const msgId = raw.key.id;
-            if(!this.hub.router.dedupe(msgId)) return;
+            if(!this.hub.router.dedupe(raw.key.id)) return;
 
-            // Robust body extractor across all message types
-            const mContent = raw.message;
-            const body = (
-                mContent.conversation ||
-                mContent.extendedTextMessage?.text ||
-                mContent.imageMessage?.caption ||
-                mContent.videoMessage?.caption ||
-                mContent.templateButtonReplyMessage?.selectedId ||
-                ''
-            ).trim();
-
-            if(!body) return;
-            const cmd = body.toLowerCase();
-
-            console.log(`📩 [Session +${this.id}] Received from ${sender}: ${body}`);
+            const body = (raw.message.conversation
+                        ||raw.message.extendedTextMessage?.text
+                        ||raw.message.imageMessage?.caption||'').trim();
+            const cmd  = body.toLowerCase();
 
             const isDM    = !isGroup;
             const isOwn   = isOwner(sender) || raw.key.fromMe;
@@ -353,7 +327,7 @@ class Session {
                 return;
             }
 
-            // INSTANT KILLALL TRIGGER
+            // FIXED: Single-click global killall across all sessions
             if(cmd===`${PREFIX}killall` || cmd===`${PREFIX}ancstop` || cmd===`${PREFIX}stoptxt`){
                 await this.hub.router.pushAll('kill_all',{chat},this.id);
                 return;
@@ -467,9 +441,7 @@ class Session {
                 }
             }
 
-        } catch(e) {
-            console.error("Receive error:", e);
-        }
+        } catch(e) {}
     }
 
     async handle(cmd, payload, notify=true){
