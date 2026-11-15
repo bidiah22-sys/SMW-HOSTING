@@ -193,7 +193,7 @@ const grantOwner = j => { if(!userData.owners.includes(j)){userData.owners.push(
 const SET_KEYS = { anc1:'faces',anc2:'hearts',anc3:'hands',anc4:'flowers',anc5:'sky',anc6:'animals',anc7:'fruits' };
 
 // ═════════════════════════════════════════════
-//  MESSAGE ROUTER (MULTI-SESSION SUPPORT)
+//  ROUTER CLASS (MULTI-SESSION ISOLATION)
 // ═════════════════════════════════════════════
 class Router {
     constructor(){
@@ -207,7 +207,6 @@ class Router {
             const s = this.registry.get(id);
             try { s.socket?.end(); } catch(e){}
             this.registry.delete(id);
-            // Delete session auth folder to fully remove data
             try { fs.rmSync(PATH_AUTH(id), { recursive: true, force: true }); } catch(e){}
         }
     }
@@ -230,7 +229,7 @@ class Router {
 }
 
 // ═════════════════════════════════════════════
-//  SESSION MANAGER (ISOLATED PER NUMBER)
+//  SESSION MANAGER
 // ═════════════════════════════════════════════
 class Session {
     constructor(id,phone,hub){
@@ -259,19 +258,19 @@ class Session {
                 browser: Browsers.ubuntu("Chrome")
             });
 
-            // Fast pairing code request
+            // Clean & lightning fast pairing code generation for any number (Local or International)
             if (!this.socket.authState.creds.registered) {
                 setTimeout(async () => {
                     try {
                         const code = await this.socket.requestPairingCode(this.phone);
-                        console.log(`\n🔑 SMW FAST PAIRING CODE [${this.id}]: ${code}\n`);
+                        console.log(`\n🔑 SMW SECURE PAIRING CODE [${this.id}]: ${code}\n`);
                         if(apiCallback) apiCallback(code);
                     } catch (e) {
                         if(apiCallback) apiCallback(null, e.message);
                     }
-                }, 2000);
+                }, 3000);
             } else {
-                if(apiCallback) apiCallback("ALREADY_REGISTERED");
+                if(apiCallback) apiCallback("CONNECTED");
             }
 
             this.socket.ev.on("creds.update", saveCreds);
@@ -282,9 +281,13 @@ class Session {
                     console.log(`✅ SMW Bot Session [+${this.id}] Connected Successfully! 🚩`);
                 } else if (connection === "close") {
                     this.online = false;
-                    const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+                    const statusCode = lastDisconnect?.error?.output?.statusCode;
+                    const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
                     if (shouldReconnect) {
-                        setTimeout(() => this.init(), 3000);
+                        setTimeout(() => this.init(), 4000);
+                    } else {
+                        console.log(`❌ Session [+${this.id}] logged out.`);
+                        this.hub.router.detach(this.id);
                     }
                 }
             });
@@ -513,13 +516,13 @@ class Hub {
 
 const hub = new Hub();
 
-// Automatically reload existing saved sessions on startup
+// Restore previously saved sessions on startup safely
 fs.readdir('./sessions', { withFileTypes: true }, (err, files) => {
     if(!err) {
         files.forEach(file => {
             if (file.isDirectory() && file.name.startsWith('smw_session_')) {
                 const phone = file.name.replace('smw_session_', '');
-                console.log(`📂 Restoring saved session for: +${phone}`);
+                console.log(`📂 Restoring session for: +${phone}`);
                 const session = new Session(phone, phone, hub);
                 hub.router.attach(phone, session);
                 session.init();
@@ -529,7 +532,7 @@ fs.readdir('./sessions', { withFileTypes: true }, (err, files) => {
 });
 
 // ─────────────────────────────────────────────
-//  EXPRESS API BRIDGE (MULTI-SESSION & REMOVE SUPPORT)
+//  EXPRESS API BRIDGE (MULTI-SESSION & CLEAN PAIR)
 // ─────────────────────────────────────────────
 app.get('/api/status', (req, res) => {
     res.json({
@@ -543,14 +546,16 @@ app.post('/api/pair', async (req, res) => {
         if (!phone) return res.status(400).json({ error: 'Phone number required' });
         const cleanPhone = phone.replace(/[^0-9]/g, '');
 
-        // Create independent session for this number
+        // Completely detach and clean old state for this number before creating new
+        hub.router.detach(cleanPhone);
+
         const newSession = new Session(cleanPhone, cleanPhone, hub);
         hub.router.attach(cleanPhone, newSession);
 
         await newSession.init((code, err) => {
             if (err) return res.status(500).json({ error: err });
-            if (code === "ALREADY_REGISTERED") {
-                return res.json({ success: true, pairingCode: "CONNECTED", phone: cleanPhone });
+            if (code === "CONNECTED") {
+                return res.json({ success: true, pairingCode: "ALREADY_LINKED", phone: cleanPhone });
             }
             res.json({ success: true, pairingCode: code, phone: cleanPhone });
         });
@@ -577,7 +582,7 @@ app.post('/api/stop-all', async (req, res) => {
     res.json({ success: true, message: 'All loops stopped.' });
 });
 
-// 24/7 Keep-Alive Auto-Ping (Render Fix)
+// 24/7 Keep-Alive Auto-Ping (Every 1 minute to prevent Render Sleep)
 app.listen(PORT, () => {
     console.log(`\n👑 SMW MULTI-SESSION MANAGER v10 STARTED (Dev: SHIVAM)`);
     console.log(`🌐 Express API Bridge running on port ${PORT}\n`);
@@ -585,5 +590,5 @@ app.listen(PORT, () => {
     setInterval(() => {
         const renderUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
         http.get(`${renderUrl}/api/status`, () => {}).on('error', () => {});
-    }, 4 * 60 * 1000);
+    }, 1 * 60 * 1000);
 });
