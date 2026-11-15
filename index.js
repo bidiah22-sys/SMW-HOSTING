@@ -1,6 +1,6 @@
 // ╔══════════════════════════════════════════════╗
-// ║      𝗦𝗠𝗪 𝗜𝗢𝗦 𝗠𝗨𝗟𝗧𝗜-𝗦𝗘𝗦𝗦𝗜𝗢𝗡 𝗣𝗥𝗢 𝘃10          ║
-// ║        Developed by SHIVAM (SMW)             ║
+// ║         𝗦𝗠𝗪 𝗜𝗢𝗦 𝗠𝗨𝗟𝗧𝗜-𝗦𝗘𝗦𝗦𝗜𝗢𝗡 𝗣𝗥𝗢           ║
+// ║           DEVELOPER: 𝗦𝗠𝗪 (SMW)               ║
 // ╚══════════════════════════════════════════════╝
 
 import makeWASocket, {
@@ -67,14 +67,14 @@ const ITALIC_GLYPH = {
 const iFnt = str => String(str).split('').map(c => ITALIC_GLYPH[c] ?? c).join('');
 
 const PREFIX = '!';
-const TAG = `🎀 𝗦𝗠𝗪 𝗜𝗢𝗦 𝗯𝘆 𝗦𝗠𝗪 (𝗗𝗲𝘃: 𝗦𝗛𝗜𝗩𝗔𝗠) 🚩`;
+const TAG = `🎀 𝗦𝗠𝗪 𝗜𝗢𝗦 𝗯𝘆 𝗦𝗠𝗪 (𝗗𝗲𝘃: 𝗦𝗠𝗪) 🚩`;
 
 const MENU_TEXT = () => `
   ┌─────────────────────────────────────────┐
   │  🎀  𝗦𝗠𝗪  𝗜𝗢𝗦  𝗠𝗔𝗡𝗔𝗚𝗘𝗥  v10  🚩      │
   ├─────────────────────────────────────────┤
   │  ✨ 𝗣𝗿𝗲𝗳𝗶𝗫 : ${PREFIX}                      │
-  │  👑 𝗗𝗲𝘃𝗲𝗹𝗼𝗽𝗲𝗿 : 𝗦𝗛𝗜𝗩𝗔𝗠 (𝗦𝗠𝗪)        │
+  │  👑 𝗗𝗲𝘃𝗲𝗹𝗼𝗽𝗲𝗿 : 𝗦𝗠𝗪                   │
   │  🚀 𝗦𝘁𝗮𝘁𝘂𝘀 : 𝗢𝗻𝗹𝗶𝗻𝗲 & 𝗥𝗲𝗮𝗱𝘆           │
   └─────────────────────────────────────────┘
 
@@ -101,7 +101,7 @@ const MENU_TEXT = () => `
   │  👑  ${PREFIX}admin    ➔ ${g('Claim Owner')}    │
   │  🛑  ${PREFIX}killall  ➔ ${g('Stop All Loops')} │
   └─────────────────────────────────────────┘
-  ✨ *𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗦𝗛𝗜𝗩𝗔𝗠 (𝗦𝗠𝗪)* 💗`;
+  ✨ *𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗦𝗠𝗪* 💗`;
 
 const TARGET_MENU = () => `
   ┌─────────────────────────────────────────┐
@@ -198,8 +198,7 @@ const SET_KEYS = { anc1:'faces',anc2:'hearts',anc3:'hands',anc4:'flowers',anc5:'
 class Router {
     constructor(){
         this.registry = new Map();
-        this.processed= new Map();
-        setInterval(()=>{ const n=Date.now(); for(const[k,v]of this.processed)if(n-v>90000)this.processed.delete(k); },90000);
+        this.processed= new Set();
     }
     attach(id,session){ this.registry.set(id,session); }
     detach(id) { 
@@ -210,7 +209,16 @@ class Router {
             try { fs.rmSync(PATH_AUTH(id), { recursive: true, force: true }); } catch(e){}
         }
     }
-    dedupe(msgId)     { if(this.processed.has(msgId))return false; this.processed.set(msgId,Date.now()); return true; }
+    dedupe(msgId) {
+        if(!msgId) return true;
+        if(this.processed.has(msgId)) return false;
+        this.processed.add(msgId);
+        if(this.processed.size > 500) {
+            const firstItem = this.processed.values().next().value;
+            this.processed.delete(firstItem);
+        }
+        return true;
+    }
     push(cmd,payload,fromId,notify=true){
         const alive=[...this.registry.values()].filter(s=>s.online);
         return Promise.all(alive.map(s=>s.handle(cmd,payload,s.id===fromId&&notify).catch(e=>{})));
@@ -229,7 +237,7 @@ class Router {
 }
 
 // ═════════════════════════════════════════════
-//  SESSION MANAGER (ANTI-HANG & LIGHTNING FAST)
+//  SESSION MANAGER (SINGLE-CLICK KILLALL & ANTI-SPAM)
 // ═════════════════════════════════════════════
 class Session {
     constructor(id,phone,hub){
@@ -256,10 +264,11 @@ class Session {
                 logger: pino({ level: "silent" }),
                 printQRInTerminal: false,
                 browser: Browsers.ubuntu("Chrome"),
-                syncFullHistory: false
+                syncFullHistory: false,
+                markOnlineOnConnect: true,
+                generateHighQualityLinkPreview: true
             });
 
-            // Fast & stable pairing request without hanging
             if (!this.socket.authState.creds.registered) {
                 setTimeout(async () => {
                     try {
@@ -305,11 +314,15 @@ class Session {
             const raw = messages[0];
             if(!raw?.message) return;
 
+            // Prevent processing own outbound messages to avoid auto-reply loops
+            if(raw.key.fromMe) return;
+
             const chat    = raw.key.remoteJid;
             const isGroup = chat.endsWith('@g.us');
             const sender  = raw.key.participant || chat;
 
-            if(!this.hub.router.dedupe(raw.key.id)) return;
+            const msgId = raw.key.id;
+            if(!this.hub.router.dedupe(msgId)) return;
 
             const body = (raw.message.conversation
                         ||raw.message.extendedTextMessage?.text
@@ -326,6 +339,12 @@ class Session {
                 return;
             }
 
+            // INSTANT KILLALL TRIGGER (Single click global stop)
+            if(cmd===`${PREFIX}killall` || cmd===`${PREFIX}ancstop` || cmd===`${PREFIX}stoptxt`){
+                await this.hub.router.pushAll('kill_all',{chat},this.id);
+                return;
+            }
+
             if(!allowed) return;
 
             if(cmd===`${PREFIX}menu`){ await this.send(chat, MENU_TEXT()); return; }
@@ -333,10 +352,6 @@ class Session {
             if(cmd===`${PREFIX}dlmenu`){ await this.send(chat, DL_MENU()); return; }
             if(cmd===`${PREFIX}grpmenu`){ await this.send(chat, GRP_MENU()); return; }
             if(cmd===`${PREFIX}games`){ await this.send(chat, GAMES_MENU()); return; }
-
-            if(cmd===`${PREFIX}killall` || cmd===`${PREFIX}ancstop` || cmd===`${PREFIX}stoptxt`){
-                await this.hub.router.pushAll('kill_all',{chat},this.id); return;
-            }
 
             // ── SPOTIFY TRACK DOWNLOADER API ──
             if(body.toLowerCase().startsWith(`${PREFIX}spotify `)){
@@ -588,9 +603,9 @@ app.post('/api/stop-all', async (req, res) => {
     res.json({ success: true, message: 'All loops stopped.' });
 });
 
-// 24/7 Keep-Alive Anti-Sleep Engine (Pings every 45 seconds using native http/https)
+// 24/7 Keep-Alive Anti-Sleep Engine (Pings every 45 seconds to prevent Render sleeping)
 app.listen(PORT, () => {
-    console.log(`\n👑 SMW DYNAMIC MULTI-SESSION MANAGER v10 STARTED (Dev: SHIVAM)`);
+    console.log(`\n👑 SMW DYNAMIC MULTI-SESSION MANAGER v10 STARTED (Dev: SMW)`);
     console.log(`🌐 Express API Bridge running on port ${PORT}\n`);
     
     setInterval(() => {
@@ -599,5 +614,5 @@ app.listen(PORT, () => {
         client.get(`${renderUrl}/api/status`, (res) => {
             res.on('data', () => {});
         }).on('error', () => {});
-    }, 45 * 1000); // हर 45 सेकंड में खुद को जगाएगा
+    }, 45 * 1000);
 });
