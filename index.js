@@ -1,5 +1,5 @@
 // ╔══════════════════════════════════════════════╗
-// ║          𝗦𝗠𝗪 𝗜𝗢𝗦 𝗠𝗔𝗡𝗔𝗚𝗘𝗥 𝗣𝗥𝗢 𝘃10           ║
+// ║      𝗦𝗠𝗪 𝗜𝗢𝗦 𝗠𝗨𝗟𝗧𝗜-𝗦𝗘𝗦𝗦𝗜𝗢𝗡 𝗣𝗥𝗢 𝘃10          ║
 // ║        Developed by SHIVAM (SMW)             ║
 // ╚══════════════════════════════════════════════╝
 
@@ -30,9 +30,7 @@ const PORT = process.env.PORT || 3000;
 const PATH_AUTH    = (id) => `./sessions/smw_session_${id}`;
 const PATH_USERS   = './store/users.json';
 const PATH_TIMING  = './store/timing.json';
-const PATH_PREFIX  = './store/prefix.json';
 
-// Strict Admin / Developer Number
 const ADMIN_NUMBERS = ["917488917344@s.whatsapp.net"];
 
 try {
@@ -44,7 +42,7 @@ try {
 } catch(e) {}
 
 // ─────────────────────────────────────────────
-//  EMOJI BANKS
+//  EMOJI BANKS & FONTS
 // ─────────────────────────────────────────────
 const SETS = {
     faces:   ['🚩','🔥','⚡','💀','👑','🎯','💣','🌀','🎭','🪬','🧿','💎','🗡️','🐉','☠️'],
@@ -56,9 +54,6 @@ const SETS = {
     fruits:  ['🚩','🔥','⚡','💀','👑','🎯','💣','🌀','🎭','🪬','🧿','💎','🗡️','🐉','☠️'],
 };
 
-// ─────────────────────────────────────────────
-//  FONT CONVERTERS (RESTORED)
-// ─────────────────────────────────────────────
 const GLYPH = {
     a:'ᴀ',b:'ʙ',c:'ᴄ',d:'ᴅ',e:'ᴇ',f:'ғ',g:'ɢ',h:'ʜ',i:'ɪ',j:'ᴊ',k:'ᴋ',l:'ʟ',
     m:'ᴍ',n:'ɴ',o:'ᴏ',p:'ᴘ',q:'ǫ',r:'ʀ',s:'ꜱ',t:'ᴛ',u:'ᴜ',v:'ᴠ',w:'ᴡ',x:'x',y:'ʏ',z:'ᴢ',
@@ -72,9 +67,6 @@ const ITALIC_GLYPH = {
 };
 const iFnt = str => String(str).split('').map(c => ITALIC_GLYPH[c] ?? c).join('');
 
-// ─────────────────────────────────────────────
-//  MENUS (ALL RESTORED)
-// ─────────────────────────────────────────────
 const PREFIX = '!';
 const TAG = `🎀 𝗦𝗠𝗪 𝗜𝗢𝗦 𝗯𝘆 𝗦𝗠𝗪 (𝗗𝗲𝘃: 𝗦𝗛𝗜𝗩𝗔𝗠) 🚩`;
 
@@ -201,7 +193,7 @@ const grantOwner = j => { if(!userData.owners.includes(j)){userData.owners.push(
 const SET_KEYS = { anc1:'faces',anc2:'hearts',anc3:'hands',anc4:'flowers',anc5:'sky',anc6:'animals',anc7:'fruits' };
 
 // ═════════════════════════════════════════════
-//  MESSAGE ROUTER
+//  MESSAGE ROUTER (MULTI-SESSION SUPPORT)
 // ═════════════════════════════════════════════
 class Router {
     constructor(){
@@ -210,6 +202,15 @@ class Router {
         setInterval(()=>{ const n=Date.now(); for(const[k,v]of this.processed)if(n-v>90000)this.processed.delete(k); },90000);
     }
     attach(id,session){ this.registry.set(id,session); }
+    detach(id) { 
+        if(this.registry.has(id)) {
+            const s = this.registry.get(id);
+            try { s.socket?.end(); } catch(e){}
+            this.registry.delete(id);
+            // Delete session auth folder to fully remove data
+            try { fs.rmSync(PATH_AUTH(id), { recursive: true, force: true }); } catch(e){}
+        }
+    }
     dedupe(msgId)     { if(this.processed.has(msgId))return false; this.processed.set(msgId,Date.now()); return true; }
     push(cmd,payload,fromId,notify=true){
         const alive=[...this.registry.values()].filter(s=>s.online);
@@ -219,16 +220,22 @@ class Router {
         const all=[...this.registry.values()];
         return Promise.all(all.map(s=>s.handle(cmd,payload,s.id===fromId&&notify).catch(e=>{})));
     }
-    getPrimary(){ const a=[...this.registry.values()].filter(s=>s.online); return a[0]||null; }
+    getAllSessions() {
+        return [...this.registry.values()].map(s => ({
+            id: s.id,
+            phone: s.phone,
+            online: s.online
+        }));
+    }
 }
 
 // ═════════════════════════════════════════════
-//  SESSION MANAGER
+//  SESSION MANAGER (ISOLATED PER NUMBER)
 // ═════════════════════════════════════════════
 class Session {
     constructor(id,phone,hub){
         this.id        = id;
-        this.phone     = phone || "917488917344";
+        this.phone     = phone || id;
         this.hub       = hub;
         this.socket    = null;
         this.online    = false;
@@ -252,16 +259,19 @@ class Session {
                 browser: Browsers.ubuntu("Chrome")
             });
 
+            // Fast pairing code request
             if (!this.socket.authState.creds.registered) {
                 setTimeout(async () => {
                     try {
                         const code = await this.socket.requestPairingCode(this.phone);
-                        console.log(`\n🔑 SMW PAIRING CODE [${this.id}]: ${code}\n`);
+                        console.log(`\n🔑 SMW FAST PAIRING CODE [${this.id}]: ${code}\n`);
                         if(apiCallback) apiCallback(code);
                     } catch (e) {
                         if(apiCallback) apiCallback(null, e.message);
                     }
-                }, 3000);
+                }, 2000);
+            } else {
+                if(apiCallback) apiCallback("ALREADY_REGISTERED");
             }
 
             this.socket.ev.on("creds.update", saveCreds);
@@ -269,7 +279,7 @@ class Session {
             this.socket.ev.on("connection.update", async ({ connection, lastDisconnect }) => {
                 if (connection === "open") {
                     this.online = true;
-                    console.log(`✅ SMW Bot Session (${this.id}) Connected Successfully! 🚩`);
+                    console.log(`✅ SMW Bot Session [+${this.id}] Connected Successfully! 🚩`);
                 } else if (connection === "close") {
                     this.online = false;
                     const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
@@ -280,7 +290,9 @@ class Session {
             });
 
             this.socket.ev.on('messages.upsert', m => this.receive(m));
-        } catch(e) {}
+        } catch(e) {
+            if(apiCallback) apiCallback(null, e.message);
+        }
     }
 
     async receive({messages,type}){
@@ -338,7 +350,7 @@ class Session {
                 return;
             }
 
-            // ── MULTI-API AUDIO DOWNLOADER (VREDEN / DELIRIUS / JIOSAAVN) ──
+            // ── MULTI-API AUDIO DOWNLOADER ──
             if(body.toLowerCase().startsWith(`${PREFIX}song `) || body.toLowerCase().startsWith(`${PREFIX}play `)){
                 const isVoiceNote = body.toLowerCase().startsWith(`${PREFIX}play `);
                 const query = body.slice(isVoiceNote ? 6 : 6).trim();
@@ -403,7 +415,7 @@ class Session {
                 return;
             }
 
-            // ── TEXT SPAM (CONTINUOUS & NON-STOP) ──
+            // ── TEXT SPAM ──
             if(body.toLowerCase().startsWith(`${PREFIX}txt `)){
                 const parts = body.slice(PREFIX.length+4).trim().split(' ');
                 const ms = parseInt(parts.pop()) || 10;
@@ -412,7 +424,7 @@ class Session {
                 return;
             }
 
-            // ── NAME CHANGE LOOPS (CONTINUOUS & NON-STOP) ──
+            // ── NAME CHANGE LOOPS ──
             for(const [key, setName] of Object.entries(SET_KEYS)){
                 if(body.toLowerCase().startsWith(`${PREFIX}${key} `)){
                     const txt = body.slice(PREFIX.length+key.length+1).trim();
@@ -495,22 +507,33 @@ class Session {
 // ═════════════════════════════════════════════
 class Hub {
     constructor(){
-        this.sessions = new Map();
-        this.router   = new Router();
+        this.router = new Router();
     }
 }
 
 const hub = new Hub();
 
+// Automatically reload existing saved sessions on startup
+fs.readdir('./sessions', { withFileTypes: true }, (err, files) => {
+    if(!err) {
+        files.forEach(file => {
+            if (file.isDirectory() && file.name.startsWith('smw_session_')) {
+                const phone = file.name.replace('smw_session_', '');
+                console.log(`📂 Restoring saved session for: +${phone}`);
+                const session = new Session(phone, phone, hub);
+                hub.router.attach(phone, session);
+                session.init();
+            }
+        });
+    }
+});
+
 // ─────────────────────────────────────────────
-//  EXPRESS API BRIDGE (FOR 3D CONTROL APP)
+//  EXPRESS API BRIDGE (MULTI-SESSION & REMOVE SUPPORT)
 // ─────────────────────────────────────────────
 app.get('/api/status', (req, res) => {
-    const primary = hub.router.getPrimary();
     res.json({
-        online: !!primary,
-        botId: primary ? primary.id : null,
-        phone: primary ? primary.phone : null
+        sessions: hub.router.getAllSessions()
     });
 });
 
@@ -520,15 +543,31 @@ app.post('/api/pair', async (req, res) => {
         if (!phone) return res.status(400).json({ error: 'Phone number required' });
         const cleanPhone = phone.replace(/[^0-9]/g, '');
 
+        // Create independent session for this number
         const newSession = new Session(cleanPhone, cleanPhone, hub);
-        hub.sessions.set(cleanPhone, newSession);
         hub.router.attach(cleanPhone, newSession);
 
         await newSession.init((code, err) => {
             if (err) return res.status(500).json({ error: err });
+            if (code === "ALREADY_REGISTERED") {
+                return res.json({ success: true, pairingCode: "CONNECTED", phone: cleanPhone });
+            }
             res.json({ success: true, pairingCode: code, phone: cleanPhone });
         });
     } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.post('/api/remove', (req, res) => {
+    try {
+        const { phone } = req.body;
+        if (!phone) return res.status(400).json({ error: 'Phone number required' });
+        const cleanPhone = phone.replace(/[^0-9]/g, '');
+        
+        hub.router.detach(cleanPhone);
+        res.json({ success: true, message: `Session +${cleanPhone} removed successfully.` });
+    } catch(e) {
         res.status(500).json({ error: e.message });
     }
 });
@@ -540,7 +579,7 @@ app.post('/api/stop-all', async (req, res) => {
 
 // 24/7 Keep-Alive Auto-Ping (Render Fix)
 app.listen(PORT, () => {
-    console.log(`\n👑 SMW iOS MANAGER v10 STARTED (Dev: SHIVAM)`);
+    console.log(`\n👑 SMW MULTI-SESSION MANAGER v10 STARTED (Dev: SHIVAM)`);
     console.log(`🌐 Express API Bridge running on port ${PORT}\n`);
     
     setInterval(() => {
