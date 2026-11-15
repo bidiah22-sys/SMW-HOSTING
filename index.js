@@ -1,1018 +1,550 @@
-"use strict";
+// ╔══════════════════════════════════════════════╗
+// ║          𝗦𝗠𝗪 𝗜𝗢𝗦 𝗠𝗔𝗡𝗔𝗚𝗘𝗥 𝗣𝗥𝗢 𝘃10           ║
+// ║        Developed by SHIVAM (SMW)             ║
+// ╚══════════════════════════════════════════════╝
 
-/*
- * ╔══════════════════════════════════════════════╗
- * ║             SMW HOSTING 🚩                   ║
- * ║       Telegram Hosting Management Bot       ║
- * ╚══════════════════════════════════════════════╝
- *
- * Node.js 20+
- * Render Web Service
- */
+import makeWASocket, {
+    useMultiFileAuthState,
+    DisconnectReason,
+    delay,
+    fetchLatestBaileysVersion,
+    Browsers
+} from '@whiskeysockets/baileys';
+import express from 'express';
+import cors from 'cors';
+import http from 'http';
+import fs from 'fs';
+import pino from 'pino';
 
-const { Telegraf, Markup } = require("telegraf");
-const express = require("express");
-const axios = require("axios");
-const fs = require("fs");
-const path = require("path");
-const os = require("os");
-const crypto = require("crypto");
-const { exec, spawn } = require("child_process");
-
-// =================================================
-// CONFIGURATION
-// =================================================
-
-const BOT_TOKEN = "9018432626:AAEzE-we9BzMCQyOrRlC_4TSPWx8VuQfyEk";
-
-const ADMIN_USERNAME = "fx_sidhu";
-const ADMIN_TELEGRAM_ID = Number(process.env.ADMIN_TELEGRAM_ID || 0);
-
-const PORT = Number(process.env.PORT) || 3000;
-const MAX_FILE_SIZE = 15 * 1024 * 1024;
-
-const DATA_DIR = path.join(__dirname, "data");
-const PROJECT_DIR = path.join(__dirname, "projects");
-const RUNNING_DIR = path.join(__dirname, "running");
-
-const DB_FILE = path.join(DATA_DIR, "database.json");
-
+// ─────────────────────────────────────────────
+//  EXPRESS API & KEEP-ALIVE SERVER SETUP
+// ─────────────────────────────────────────────
 const app = express();
+app.use(cors());
+app.use(express.json());
+const PORT = process.env.PORT || 3000;
 
-app.use(express.json({ limit: "32kb" }));
+// ─────────────────────────────────────────────
+//  STORAGE PATHS & CONFIG
+// ─────────────────────────────────────────────
+const PATH_AUTH    = (id) => `./sessions/smw_session_${id}`;
+const PATH_USERS   = './store/users.json';
+const PATH_TIMING  = './store/timing.json';
+const PATH_PREFIX  = './store/prefix.json';
 
-if (
-    !BOT_TOKEN ||
-    BOT_TOKEN === "PASTE_YOUR_NEW_BOT_TOKEN_HERE"
-) {
-    console.error("SMW HOSTING: Add your new BOT_TOKEN in index.js");
-    process.exit(1);
-}
+// Strict Admin / Developer Number
+const ADMIN_NUMBERS = ["917488917344@s.whatsapp.net"];
 
-// =================================================
-// DIRECTORIES
-// =================================================
-
-for (const dir of [DATA_DIR, PROJECT_DIR, RUNNING_DIR]) {
-    if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+try {
+    fs.mkdirSync('./store', {recursive:true});
+    if(!fs.existsSync('./store/cookies.txt')){
+        const b64 = "IyBOZXRzY2FwZSmvQ29va2llIEZpbGUh";
+        fs.writeFileSync('./store/cookies.txt', Buffer.from(b64, 'base64').toString('utf8'));
     }
-}
+} catch(e) {}
 
-// =================================================
-// DATABASE
-// =================================================
+// ─────────────────────────────────────────────
+//  EMOJI BANKS
+// ─────────────────────────────────────────────
+const SETS = {
+    faces:   ['🚩','🔥','⚡','💀','👑','🎯','💣','🌀','🎭','🪬','🧿','💎','🗡️','🐉','☠️'],
+    hearts:  ['🖤','❤️','🤍','🤎','🩷','🧡','💛','💚','💙','💜','🩵','🖤','❤️','🤍','🤎'],
+    hands:   ['🔥','🚩','⚡','👑','💀','🎯','💣','🌀','🎭','🪬','🧿','💎','🗡️','🐉','☠️'],
+    flowers: ['🚩','🔥','⚡','💀','👑','🎯','💣','🌀','🎭','🪬','🧿','💎','🗡️','🐉','☠️'],
+    sky:     ['🚩','🔥','⚡','💀','👑','🎯','💣','🌀','🎭','🪬','🧿','💎','🗡️','🐉','☠️'],
+    animals: ['🚩','🔥','⚡','💀','👑','🎯','💣','🌀','🎭','🪬','🧿','💎','🗡️','🐉','☠️'],
+    fruits:  ['🚩','🔥','⚡','💀','👑','🎯','💣','🌀','🎭','🪬','🧿','💎','🗡️','🐉','☠️'],
+};
 
-function defaultDatabase() {
-    return {
-        users: {},
-        projects: {},
-        activeProcesses: {},
-        executions: 0,
-        startedAt: new Date().toISOString()
-    };
-}
+// ─────────────────────────────────────────────
+//  FONT CONVERTERS (RESTORED)
+// ─────────────────────────────────────────────
+const GLYPH = {
+    a:'ᴀ',b:'ʙ',c:'ᴄ',d:'ᴅ',e:'ᴇ',f:'ғ',g:'ɢ',h:'ʜ',i:'ɪ',j:'ᴊ',k:'ᴋ',l:'ʟ',
+    m:'ᴍ',n:'ɴ',o:'ᴏ',p:'ᴘ',q:'ǫ',r:'ʀ',s:'ꜱ',t:'ᴛ',u:'ᴜ',v:'ᴠ',w:'ᴡ',x:'x',y:'ʏ',z:'ᴢ',
+    A:'𝗔',B:'𝗕',C:'𝗖',D:'𝗗',E:'𝗘',F:'𝗙',G:'𝗚',H:'𝗛',I:'𝗜',J:'𝗝',K:'𝗞',L:'𝗟',
+    M:'𝗠',N:'𝗡',O:'𝗢',P:'𝗣',Q:'𝗤',R:'𝗥',S:'𝗦',T:'𝗧',U:'𝗨',V:'𝗩',W:'𝗪',X:'𝗫',Y:'𝗬',Z:'𝗭'
+};
+const g = str => String(str).split('').map(c => GLYPH[c] ?? c).join('');
 
-function loadDatabase() {
-    try {
-        if (!fs.existsSync(DB_FILE)) {
-            return defaultDatabase();
-        }
+const ITALIC_GLYPH = {
+    a:'𝘢',b:'𝘣',c:'𝘤',d:'𝘥',e:'𝘦',f:'𝘧',g:'𝘨',h:'𝘩',i:'𝘪',j:'𝘫',k:'𝘬',l:'𝘭',m:'𝘮',n:'𝘯',o:'𝘰',p:'𝘱',q:'𝘲',r:'𝘳',s:'𝘴',t:'𝘵',u:'𝘶',v:'𝘷',w:'𝘸',x:'𝘹',y:'𝘺',z:'𝘻'
+};
+const iFnt = str => String(str).split('').map(c => ITALIC_GLYPH[c] ?? c).join('');
 
-        const data = JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
+// ─────────────────────────────────────────────
+//  MENUS (ALL RESTORED)
+// ─────────────────────────────────────────────
+const PREFIX = '!';
+const TAG = `🎀 𝗦𝗠𝗪 𝗜𝗢𝗦 𝗯𝘆 𝗦𝗠𝗪 (𝗗𝗲𝘃: 𝗦𝗛𝗜𝗩𝗔𝗠) 🚩`;
 
-        return {
-            ...defaultDatabase(),
-            ...data
-        };
-    } catch (error) {
-        console.error("Database read error:", error.message);
-        return defaultDatabase();
+const MENU_TEXT = () => `
+  ┌─────────────────────────────────────────┐
+  │  🎀  𝗦𝗠𝗪  𝗜𝗢𝗦  𝗠𝗔𝗡𝗔𝗚𝗘𝗥  v10  🚩      │
+  ├─────────────────────────────────────────┤
+  │  ✨ 𝗣𝗿𝗲𝗳𝗶𝗫 : ${PREFIX}                      │
+  │  👑 𝗗𝗲𝘃𝗲𝗹𝗼𝗽𝗲𝗿 : 𝗦𝗛𝗜𝗩𝗔𝗠 (𝗦𝗠𝗪)        │
+  │  🚀 𝗦𝘁𝗮𝘁𝘂𝘀 : 𝗢𝗻𝗹𝗶𝗻𝗲 & 𝗥𝗲𝗮𝗱𝘆           │
+  └─────────────────────────────────────────┘
+
+  📂  *${g('CORE COMMAND MENUS')}*
+
+  > 🎯  ${PREFIX}targetmenu
+         ↳ ${g('name change loops, spam, swipe,')}
+           ${g('slide and attack utilities')}
+
+  > 📥  ${PREFIX}dlmenu
+         ↳ ${g('spotify & multi-api downloader,')}
+           ${g('high performance engine')}
+
+  > 👥  ${PREFIX}grpmenu
+         ↳ ${g('group security, locks, mutes,')}
+           ${g('and admin management')}
+
+  > 🎮  ${PREFIX}games
+         ↳ ${g('fun mini-games and utilities')}
+
+  ┌─────────────────────────────────────────┐
+  │  ⚙️  *${g('SYSTEM CONTROLS')}*              │
+  ├─────────────────────────────────────────┤
+  │  👑  ${PREFIX}admin    ➔ ${g('Claim Owner')}    │
+  │  🛑  ${PREFIX}killall  ➔ ${g('Stop All Loops')} │
+  └─────────────────────────────────────────┘
+  ✨ *𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗦𝗛𝗜𝗩𝗔𝗠 (𝗦𝗠𝗪)* 💗`;
+
+const TARGET_MENU = () => `
+  ┌─────────────────────────────────────────┐
+  │  🎯  𝗧𝗔𝗥𝗚𝗘𝗧  𝗖𝗢𝗡𝗧𝗥𝗢𝗟  𝗖𝗘𝗡𝗧𝗘𝗥  🔥  │
+  ├─────────────────────────────────────────┤
+  │  ✨ 𝗣𝗿𝗲𝗳𝗶𝗫 : ${PREFIX}                      │
+  └─────────────────────────────────────────┘
+
+  🔥  *${g('NAME CHANGE LOOPS')}*
+  • ${PREFIX}anc1-7 [text]  • ${PREFIX}ancstop
+
+  💣  *${g('SPAM & THREADS')}*
+  • ${PREFIX}txt [text] [ms]  • ${PREFIX}stoptxt
+
+  ⚡  *${g('EMERGENCY COMMANDS')}*
+  • ${PREFIX}killall  ➔ ${g('Stop everything instantly')}
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  🎯 *𝗔𝘁𝘁𝗮𝗰𝗸 𝗠𝗼𝗱𝗲 𝗔𝗰𝘁𝗶𝘃𝗲* ⚡`;
+
+const DL_MENU = () => `
+  ┌─────────────────────────────────────────┐
+  │  📥  𝗗𝗢𝗪𝗡𝗟𝗢𝗔𝗗  &  𝗠𝗘𝗗𝗜𝗔  🎵  │
+  ├─────────────────────────────────────────┤
+  │  ✨ 𝗣𝗿𝗲𝗳𝗶𝗫 : ${PREFIX}                      │
+  └─────────────────────────────────────────┘
+
+  🎵  *${g('SPOTIFY & MULTI-API AUDIO')}*
+  • ${PREFIX}song [name]   ➔ ${g('Audio File')}
+  • ${PREFIX}spotify [url] ➔ ${g('Spotify Track Download')}
+  • ${PREFIX}play [name]   ➔ ${g('Voice Note (PTT)')}
+  • ${PREFIX}video [name]  ➔ ${g('Direct MP4 Video')}
+
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  📥 *Robust Multi-API Downloader Engine* 🚀`;
+
+const GRP_MENU = () => `
+  ┌─────────────────────────────────────────┐
+  │  👥  𝗚𝗥𝗢𝗨𝗣  𝗠𝗔𝗡𝗔𝗚𝗘𝗠𝗘𝗡𝗧  🛡️  │
+  ├─────────────────────────────────────────┤
+  │  ✨ 𝗣𝗿𝗲𝗳𝗶𝗫 : ${PREFIX}                      │
+  └─────────────────────────────────────────┘
+
+  🛡️  *${g('SECURITY & MODERATION')}*
+  • ${PREFIX}lockgc        • ${PREFIX}unlockgc
+  • ${PREFIX}mute @user    • ${PREFIX}unmute @user
+  • ${PREFIX}promote @user • ${PREFIX}demote @user
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  👥 *𝗚𝗿𝗼𝘂𝗽 𝗖𝗼𝗻𝘁𝗿𝗼𝗹 𝗦𝘆𝘀𝘁𝗲𝗺* 🔒`;
+
+const GAMES_MENU = () => `
+  ┌─────────────────────────────────────────┐
+  │  🎮  𝗚𝗔𝗠𝗘𝗦  &  𝗨𝗧𝗜𝗟𝗜𝗧𝗜𝗘𝗦  🎲  │
+  ├─────────────────────────────────────────┤
+  │  ✨ 𝗣𝗿𝗲𝗳𝗶𝗫 : ${PREFIX}                      │
+  └─────────────────────────────────────────┘
+
+  🎮  *${g('FUN COMMANDS')}*
+  • ${PREFIX}flip  • ${PREFIX}roll  • ${PREFIX}rps
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ✨ *𝗘𝗻𝗷𝗼𝘆 𝗬𝗼𝘂𝗿 𝗧𝗶𝗺𝗲* 🌸`;
+
+const win = what => `
+  ┌─────────────────────────┐
+  │  ✨ 𝗔𝗖𝗧𝗜𝗩𝗔𝗧𝗘𝗗          │
+  └─────────────────────────┘
+  ▶ ${g(what)} ${g('is running continuously!')}
+  💗 *${TAG}*`;
+
+// ─────────────────────────────────────────────
+//  PERSISTENCE HELPERS
+// ─────────────────────────────────────────────
+const ensureDir = p => { const d=p.includes('/')?p.substring(0,p.lastIndexOf('/')):'.'; if(!fs.existsSync(d))fs.mkdirSync(d,{recursive:true}); };
+const readJson  = (p,def) => { try{ if(fs.existsSync(p)) return JSON.parse(fs.readFileSync(p,'utf8')); }catch{} return {...def}; };
+const writeJson = (p,d)   => { try{ ensureDir(p); fs.writeFileSync(p,JSON.stringify(d,null,2)); }catch{} };
+
+let userData   = readJson(PATH_USERS,  { owners:[], subs:{} });
+let timingMap  = readJson(PATH_TIMING, { anc1:10,anc2:10,anc3:10,anc4:10,anc5:10,anc6:10,anc7:10 });
+const saveUsers  = () => writeJson(PATH_USERS,  userData);
+
+const isOwner = j => {
+    if (!j) return false;
+    const cleanJid = j.split('@')[0].split(':')[0];
+    return userData.owners.includes(j) || ADMIN_NUMBERS.some(num => num.includes(cleanJid));
+};
+const isSub = (j,g) => userData.subs[g]?.includes(j) || false;
+const grantOwner = j => { if(!userData.owners.includes(j)){userData.owners.push(j);saveUsers();return true;} return false; };
+
+const SET_KEYS = { anc1:'faces',anc2:'hearts',anc3:'hands',anc4:'flowers',anc5:'sky',anc6:'animals',anc7:'fruits' };
+
+// ═════════════════════════════════════════════
+//  MESSAGE ROUTER
+// ═════════════════════════════════════════════
+class Router {
+    constructor(){
+        this.registry = new Map();
+        this.processed= new Map();
+        setInterval(()=>{ const n=Date.now(); for(const[k,v]of this.processed)if(n-v>90000)this.processed.delete(k); },90000);
     }
-}
-
-let db = loadDatabase();
-
-let saveQueue = Promise.resolve();
-
-function saveDatabase() {
-    const snapshot = JSON.stringify(db, null, 2);
-
-    saveQueue = saveQueue
-        .then(async () => {
-            const tempFile = DB_FILE + ".tmp";
-            await fs.promises.writeFile(tempFile, snapshot);
-            await fs.promises.rename(tempFile, DB_FILE);
-        })
-        .catch(error => {
-            console.error("Database save error:", error.message);
-        });
-
-    return saveQueue;
-}
-
-// =================================================
-// BOT
-// =================================================
-
-const bot = new Telegraf(BOT_TOKEN);
-
-const activeUsers = new Map();
-const activeProcesses = new Map();
-const crashLogs = [];
-
-let botStartedAt = Date.now();
-let botReady = false;
-
-function logError(error) {
-    const entry = {
-        time: new Date().toISOString(),
-        message: String(error?.stack || error)
-    };
-
-    crashLogs.unshift(entry);
-
-    if (crashLogs.length > 100) {
-        crashLogs.pop();
+    attach(id,session){ this.registry.set(id,session); }
+    dedupe(msgId)     { if(this.processed.has(msgId))return false; this.processed.set(msgId,Date.now()); return true; }
+    push(cmd,payload,fromId,notify=true){
+        const alive=[...this.registry.values()].filter(s=>s.online);
+        return Promise.all(alive.map(s=>s.handle(cmd,payload,s.id===fromId&&notify).catch(e=>{})));
     }
-
-    console.error(entry.message);
-}
-
-function smw(text) {
-    return text;
-}
-
-function isAdmin(ctx) {
-    const user = ctx.from;
-
-    if (!user) return false;
-
-    const username = String(user.username || "").toLowerCase();
-
-    return (
-        username === ADMIN_USERNAME.toLowerCase() ||
-        (ADMIN_TELEGRAM_ID !== 0 &&
-            Number(user.id) === ADMIN_TELEGRAM_ID)
-    );
-}
-
-function getUser(ctx) {
-    const id = String(ctx.from.id);
-
-    if (!db.users[id]) {
-        db.users[id] = {
-            id: ctx.from.id,
-            username: ctx.from.username || "",
-            firstName: ctx.from.first_name || "",
-            language: ctx.from.language_code || "unknown",
-            joinedAt: new Date().toISOString(),
-            uploads: 0,
-            projects: [],
-            lastSeen: new Date().toISOString()
-        };
+    pushAll(cmd,payload,fromId,notify=true){
+        const all=[...this.registry.values()];
+        return Promise.all(all.map(s=>s.handle(cmd,payload,s.id===fromId&&notify).catch(e=>{})));
     }
-
-    const user = db.users[id];
-
-    user.username = ctx.from.username || user.username;
-    user.firstName = ctx.from.first_name || user.firstName;
-    user.lastSeen = new Date().toISOString();
-
-    return user;
+    getPrimary(){ const a=[...this.registry.values()].filter(s=>s.online); return a[0]||null; }
 }
 
-function userProjects(userId) {
-    return Object.values(db.projects).filter(
-        project => String(project.ownerId) === String(userId)
-    );
-}
-
-function projectStatus(project) {
-    return project.status || "ANALYSIS_PENDING";
-}
-
-// =================================================
-// KEYBOARDS (ORIGINAL STYLISH SETUP)
-// =================================================
-
-function mainMenu(admin = false) {
-    const rows = [
-        [
-            Markup.button.callback("📤 UPLOAD PROJECT", "upload"),
-            Markup.button.callback("📁 MY PROJECTS", "myprojects")
-        ],
-        [
-            Markup.button.callback("👤 MY PROFILE", "profile"),
-            Markup.button.callback("💻 LANGUAGES", "languages")
-        ],
-        [
-            Markup.button.callback("📖 HELP & GUIDE", "help"),
-            Markup.button.callback("🔄 REFRESH", "home")
-        ]
-    ];
-
-    if (admin) {
-        rows.push([
-            Markup.button.callback("👑 DEVELOPER PANEL", "admin")
-        ]);
-    }
-
-    return Markup.inlineKeyboard(rows);
-}
-
-function adminMenu() {
-    return Markup.inlineKeyboard([
-        [
-            Markup.button.callback("📊 MASTER STATS", "admin_stats"),
-            Markup.button.callback("🖥 SERVICE STATUS", "admin_status")
-        ],
-        [
-            Markup.button.callback("👥 ALL USERS", "admin_users"),
-            Markup.button.callback("📁 ALL PROJECTS", "admin_projects")
-        ],
-        [
-            Markup.button.callback("📜 CRASH LOGS", "admin_logs"),
-            Markup.button.callback("🔄 REFRESH", "admin")
-        ],
-        [
-            Markup.button.callback("🏠 HOME", "home")
-        ]
-    ]);
-}
-
-function backButton(target = "home") {
-    return Markup.inlineKeyboard([
-        [Markup.button.callback("⬅️ BACK", target)]
-    ]);
-}
-
-// =================================================
-// HOME
-// =================================================
-
-async function showHome(ctx, edit = false) {
-    const user = getUser(ctx);
-    await saveDatabase();
-
-    const admin = isAdmin(ctx);
-
-    const message =
-        "🎀 SMW HOSTING 🚩\n\n" +
-        "Welcome to SMW Hosting Management.\n\n" +
-        `👤 User: ${user.firstName || "User"}\n` +
-        `🆔 ID: ${user.id}\n` +
-        `📁 Your Projects: ${userProjects(user.id).length}\n\n` +
-        "Select an option below.";
-
-    if (edit && ctx.callbackQuery) {
-        return ctx.editMessageText(
-            message,
-            mainMenu(admin)
-        ).catch(() => ctx.reply(message, mainMenu(admin)));
+// ═════════════════════════════════════════════
+//  SESSION MANAGER
+// ═════════════════════════════════════════════
+class Session {
+    constructor(id,phone,hub){
+        this.id        = id;
+        this.phone     = phone || "917488917344";
+        this.hub       = hub;
+        this.socket    = null;
+        this.online    = false;
+        this.nameLoops = new Map();
+        this.txtLoop   = new Map();
     }
 
-    return ctx.reply(message, mainMenu(admin));
-}
+    async init(apiCallback = null){
+        try {
+            const authDir = PATH_AUTH(this.id);
+            ensureDir(authDir);
 
-bot.start(async ctx => {
-    try {
-        await showHome(ctx);
-    } catch (error) {
-        logError(error);
-        await ctx.reply("SMW HOSTING: Unable to open menu.");
-    }
-});
+            const { state, saveCreds } = await useMultiFileAuthState(authDir);
+            const { version } = await fetchLatestBaileysVersion();
 
-bot.action("home", async ctx => {
-    await ctx.answerCbQuery();
-    await showHome(ctx, true);
-});
+            this.socket = makeWASocket({
+                auth: state,
+                version,
+                logger: pino({ level: "silent" }),
+                printQRInTerminal: false,
+                browser: Browsers.ubuntu("Chrome")
+            });
 
-// =================================================
-// PROFILE
-// =================================================
-
-bot.action("profile", async ctx => {
-    await ctx.answerCbQuery();
-
-    const user = getUser(ctx);
-    const projects = userProjects(user.id);
-
-    const message =
-        "👤 MY PROFILE\n\n" +
-        `Name: ${user.firstName || "Not available"}\n` +
-        `Username: @${user.username || "Not set"}\n` +
-        `Telegram ID: ${user.id}\n` +
-        `Language: ${user.language}\n` +
-        `Joined: ${user.joinedAt}\n` +
-        `Total Uploads: ${user.uploads}\n` +
-        `My Projects: ${projects.length}`;
-
-    await ctx.editMessageText(message, backButton());
-});
-
-// =================================================
-// LANGUAGES
-// =================================================
-
-bot.action("languages", async ctx => {
-    await ctx.answerCbQuery();
-
-    await ctx.editMessageText(
-        "💻 SUPPORTED PROJECT TYPES\n\n" +
-        "🟢 Node.js — package.json detection & Auto npm install\n" +
-        "🟢 Python — requirements.txt detection & Auto pip install\n" +
-        "🟢 Python — pyproject.toml detection\n" +
-        "🟢 Static Website — HTML/CSS/JS detection\n" +
-        "🟡 ZIP — project archive inspection & hosting\n\n" +
-        "⚡ Powered by SMW Live Execution Engine 🚩",
-        backButton()
-    );
-});
-
-// =================================================
-// HELP
-// =================================================
-
-bot.action("help", async ctx => {
-    await ctx.answerCbQuery();
-
-    await ctx.editMessageText(
-        "📖 SMW HOSTING — HELP CENTER\n\n" +
-        "1. Select UPLOAD PROJECT.\n" +
-        "2. Send your project file.\n" +
-        "3. The bot downloads and inspects the file.\n" +
-        "4. Project type and configuration are detected.\n" +
-        "5. Dependencies are installed automatically.\n" +
-        "6. Check and manage your live project in MY PROJECTS.\n\n" +
-        "Maximum upload size: 15 MB.",
-        backButton()
-    );
-});
-
-// =================================================
-// UPLOAD & LIVE HOSTING ENGINE
-// =================================================
-
-bot.action("upload", async ctx => {
-    await ctx.answerCbQuery();
-
-    activeUsers.set(ctx.from.id, {
-        mode: "waiting_for_project"
-    });
-
-    await ctx.editMessageText(
-        "📤 PROJECT UPLOAD & AUTO-HOSTING\n\n" +
-        "Send your project file as a Telegram document.\n\n" +
-        "Maximum size: 15 MB\n" +
-        "Supported: JS, Python, HTML, ZIP, etc.\n\n" +
-        "The bot will automatically inspect, install requirements, and host it live 24/7!",
-        backButton()
-    );
-});
-
-function detectProjectType(filename) {
-    const lower = filename.toLowerCase();
-
-    if (lower.endsWith(".zip")) return "ZIP ARCHIVE";
-    if (lower.endsWith(".js") || lower.endsWith(".mjs") || lower.endsWith(".cjs")) return "NODE.JS";
-    if (lower.endsWith(".py")) return "PYTHON";
-    if (lower.endsWith(".html") || lower.endsWith(".htm")) return "STATIC WEBSITE";
-    if (lower.endsWith(".json")) return "JSON FILE";
-    if (lower.endsWith(".css")) return "CSS FILE";
-
-    return "UNKNOWN FILE TYPE";
-}
-
-async function downloadTelegramFile(fileId, destination) {
-    const fileInfo = await bot.telegram.getFile(fileId);
-
-    if (!fileInfo.file_path) {
-        throw new Error("Telegram file path unavailable.");
-    }
-
-    const url =
-        `https://api.telegram.org/file/bot${BOT_TOKEN}/${fileInfo.file_path}`;
-
-    const response = await axios.get(url, {
-        responseType: "stream",
-        timeout: 60000,
-        maxContentLength: MAX_FILE_SIZE
-    });
-
-    const contentLength = Number(response.headers["content-length"] || 0);
-
-    if (contentLength > MAX_FILE_SIZE) {
-        response.data.destroy();
-        throw new Error("File exceeds 15 MB limit.");
-    }
-
-    let received = 0;
-
-    await new Promise((resolve, reject) => {
-        const output = fs.createWriteStream(destination);
-
-        response.data.on("data", chunk => {
-            received += chunk.length;
-
-            if (received > MAX_FILE_SIZE) {
-                response.data.destroy(
-                    new Error("File exceeds 15 MB limit.")
-                );
+            if (!this.socket.authState.creds.registered) {
+                setTimeout(async () => {
+                    try {
+                        const code = await this.socket.requestPairingCode(this.phone);
+                        console.log(`\n🔑 SMW PAIRING CODE [${this.id}]: ${code}\n`);
+                        if(apiCallback) apiCallback(code);
+                    } catch (e) {
+                        if(apiCallback) apiCallback(null, e.message);
+                    }
+                }, 3000);
             }
-        });
 
-        response.data.on("error", reject);
-        output.on("error", reject);
-        output.on("finish", resolve);
+            this.socket.ev.on("creds.update", saveCreds);
 
-        response.data.pipe(output);
-    });
-
-    return received;
-}
-
-async function inspectProject(filePath, filename) {
-    const result = {
-        type: detectProjectType(filename),
-        filename,
-        detectedFiles: [],
-        requirements: [],
-        startupCommand: null,
-        status: "ANALYSIS_PENDING"
-    };
-
-    if (filename.toLowerCase() === "package.json") {
-        const content = await fs.promises.readFile(filePath, "utf8");
-        const pkg = JSON.parse(content);
-
-        result.detectedFiles.push("package.json");
-        result.requirements = Object.keys(pkg.dependencies || {});
-        result.startupCommand = pkg.scripts?.start || pkg.main || null;
-        result.status = "CONFIGURATION_DETECTED";
-    }
-
-    if (filename.toLowerCase() === "requirements.txt") {
-        const content = await fs.promises.readFile(filePath, "utf8");
-
-        result.detectedFiles.push("requirements.txt");
-        result.requirements = content
-            .split(/\r?\n/)
-            .map(line => line.trim())
-            .filter(line => line && !line.startsWith("#"));
-
-        result.status = "CONFIGURATION_DETECTED";
-    }
-
-    if (filename.toLowerCase() === "pyproject.toml") {
-        result.detectedFiles.push("pyproject.toml");
-        result.status = "CONFIGURATION_DETECTED";
-    }
-
-    if (filename.toLowerCase() === "index.html") {
-        result.detectedFiles.push("index.html");
-        result.status = "STATIC_PROJECT_DETECTED";
-    }
-
-    return result;
-}
-
-// Live Deployment & Execution Logic
-async function deployLiveProject(projectId, filePath, filename) {
-    const projectFolder = path.join(RUNNING_DIR, projectId);
-    fs.mkdirSync(projectFolder, { recursive: true });
-
-    const ext = path.extname(filename).toLowerCase();
-    let mainFile = filename;
-
-    if (ext === ".zip") {
-        fs.copyFileSync(filePath, path.join(projectFolder, filename));
-    } else {
-        mainFile = "main" + ext;
-        fs.copyFileSync(filePath, path.join(projectFolder, mainFile));
-    }
-
-    let startupCommand = "";
-
-    if (ext === ".js" || filename === "package.json") {
-        startupCommand = `node ${mainFile}`;
-        if (fs.existsSync(path.join(projectFolder, "package.json"))) {
-            await new Promise(res => exec("npm install", { cwd: projectFolder }, res));
-        }
-    } else if (ext === ".py") {
-        startupCommand = `python3 ${mainFile}`;
-        if (fs.existsSync(path.join(projectFolder, "requirements.txt"))) {
-            await new Promise(res => exec("pip install -r requirements.txt", { cwd: projectFolder }, res));
-        }
-    }
-
-    if (startupCommand) {
-        const child = spawn(startupCommand, { cwd: projectFolder, shell: true });
-        activeProcesses.set(projectId, child);
-
-        child.stdout.on("data", (data) => {
-            console.log(`[PROJ ${projectId}]`, data.toString());
-        });
-
-        child.stderr.on("data", (data) => {
-            console.error(`[PROJ ${projectId} ERR]`, data.toString());
-        });
-
-        child.on("close", (code) => {
-            if (db.projects[projectId]) {
-                db.projects[projectId].status = `STOPPED (${code})`;
-                saveDatabase();
-            }
-        });
-    }
-
-    return startupCommand;
-}
-
-bot.on("document", async ctx => {
-    const user = getUser(ctx);
-    const state = activeUsers.get(ctx.from.id);
-
-    if (!state || state.mode !== "waiting_for_project") {
-        return ctx.reply(
-            "Please open UPLOAD PROJECT before sending a file.",
-            mainMenu(isAdmin(ctx))
-        );
-    }
-
-    const document = ctx.message.document;
-    const filename = path.basename(document.file_name || "upload.bin");
-
-    if (document.file_size && document.file_size > MAX_FILE_SIZE) {
-        return ctx.reply("❌ File too large. Maximum allowed size is 15 MB.");
-    }
-
-    const projectId = crypto.randomBytes(5).toString("hex");
-    const userFolder = path.join(PROJECT_DIR, String(ctx.from.id));
-
-    await fs.promises.mkdir(userFolder, { recursive: true });
-
-    const destination = path.join(userFolder, projectId + "_" + filename);
-
-    const statusMessage = await ctx.reply(
-        "⏳ UPLOAD STARTED\n\n" +
-        "Please wait while SMW Hosting receives your file..."
-    );
-
-    try {
-        await ctx.telegram.editMessageText(
-            ctx.chat.id,
-            statusMessage.message_id,
-            undefined,
-            "⏳ DOWNLOADING FILE...\n\nPlease wait."
-        );
-
-        const received = await downloadTelegramFile(
-            document.file_id,
-            destination
-        );
-
-        await ctx.telegram.editMessageText(
-            ctx.chat.id,
-            statusMessage.message_id,
-            undefined,
-            "✅ UPLOAD COMPLETE: 100%\n\n🔍 Inspecting and deploying live..."
-        );
-
-        const inspection = await inspectProject(destination, filename);
-        const startupCommand = await deployLiveProject(projectId, destination, filename);
-
-        const project = {
-            id: projectId,
-            ownerId: ctx.from.id,
-            ownerUsername: ctx.from.username || "",
-            filename,
-            filePath: path.relative(__dirname, destination),
-            size: received,
-            type: inspection.type,
-            requirements: inspection.requirements,
-            detectedFiles: inspection.detectedFiles,
-            startupCommand: startupCommand || inspection.startupCommand,
-            status: "RUNNING 24/7",
-            createdAt: new Date().toISOString(),
-            logs: [
-                {
-                    time: new Date().toISOString(),
-                    message: "File uploaded, dependencies installed, and project hosted live."
+            this.socket.ev.on("connection.update", async ({ connection, lastDisconnect }) => {
+                if (connection === "open") {
+                    this.online = true;
+                    console.log(`✅ SMW Bot Session (${this.id}) Connected Successfully! 🚩`);
+                } else if (connection === "close") {
+                    this.online = false;
+                    const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+                    if (shouldReconnect) {
+                        setTimeout(() => this.init(), 3000);
+                    }
                 }
-            ]
-        };
+            });
 
-        db.projects[projectId] = project;
-        user.uploads = Number(user.uploads || 0) + 1;
-        user.projects.push(projectId);
-
-        await saveDatabase();
-
-        activeUsers.delete(ctx.from.id);
-
-        const requirements =
-            inspection.requirements.length
-                ? inspection.requirements.join(", ")
-                : "No dependencies detected";
-
-        await ctx.telegram.editMessageText(
-            ctx.chat.id,
-            statusMessage.message_id,
-            undefined,
-            "🎀 SMW HOSTING — LIVE DEPLOYMENT REPORT 🚩\n\n" +
-            "✅ Upload & Host: 100% Complete\n" +
-            `📁 File: ${filename}\n` +
-            `🆔 Project ID: ${projectId}\n` +
-            `📦 Size: ${(received / 1024).toFixed(2)} KB\n` +
-            `💻 Type: ${inspection.type}\n` +
-            `🚀 Status: ONLINE & RUNNING 24/7\n\n` +
-            `📚 Detected requirements:\n${requirements}\n\n` +
-            "Your project is now successfully hosted on SMW Cloud!"
-        );
-
-    } catch (error) {
-        logError(error);
-
-        activeUsers.delete(ctx.from.id);
-
-        await ctx.telegram.editMessageText(
-            ctx.chat.id,
-            statusMessage.message_id,
-            undefined,
-            "❌ DEPLOYMENT FAILED\n\n" +
-            "Reason: " + error.message
-        ).catch(() => {});
-    }
-});
-
-// =================================================
-// MY PROJECTS
-// =================================================
-
-bot.action("myprojects", async ctx => {
-    await ctx.answerCbQuery();
-
-    const projects = userProjects(ctx.from.id);
-
-    if (!projects.length) {
-        return ctx.editMessageText(
-            "📁 MY PROJECTS\n\nNo projects uploaded yet.",
-            backButton()
-        );
+            this.socket.ev.on('messages.upsert', m => this.receive(m));
+        } catch(e) {}
     }
 
-    const buttons = projects.map(project => [
-        Markup.button.callback(
-            `${project.filename} — ${project.status}`,
-            `project_${project.id}`
-        )
-    ]);
+    async receive({messages,type}){
+        try{
+            if(type!=='notify') return;
+            const raw = messages[0];
+            if(!raw?.message) return;
 
-    buttons.push([
-        Markup.button.callback("⬅️ BACK", "home")
-    ]);
+            const chat    = raw.key.remoteJid;
+            const isGroup = chat.endsWith('@g.us');
+            const sender  = raw.key.participant || chat;
 
-    await ctx.editMessageText(
-        "📁 MY PROJECTS\n\nSelect a project to manage:",
-        Markup.inlineKeyboard(buttons)
-    );
-});
+            if(!this.hub.router.dedupe(raw.key.id)) return;
 
-bot.action(/^project_([a-f0-9]+)$/, async ctx => {
-    await ctx.answerCbQuery();
+            const body = (raw.message.conversation
+                        ||raw.message.extendedTextMessage?.text
+                        ||raw.message.imageMessage?.caption||'').trim();
+            const cmd  = body.toLowerCase();
 
-    const id = ctx.match[1];
-    const project = db.projects[id];
+            const isDM    = !isGroup;
+            const isOwn   = isOwner(sender) || raw.key.fromMe;
+            const allowed = isOwn || isSub(sender, chat);
 
-    if (!project) {
-        return ctx.reply("Project not found.");
+            if(isDM && cmd===`${PREFIX}admin`){
+                if(!userData.owners.length) { grantOwner(sender); await this.send(chat,`${TAG}\n\n👑 ${g('you are now the owner')}`); }
+                else if(isOwn)              await this.send(chat,`⚠️ ${g('you already own this bot')}`);
+                return;
+            }
+
+            if(!allowed) return;
+
+            if(cmd===`${PREFIX}menu`){ await this.send(chat, MENU_TEXT()); return; }
+            if(cmd===`${PREFIX}targetmenu`){ await this.send(chat, TARGET_MENU()); return; }
+            if(cmd===`${PREFIX}dlmenu`){ await this.send(chat, DL_MENU()); return; }
+            if(cmd===`${PREFIX}grpmenu`){ await this.send(chat, GRP_MENU()); return; }
+            if(cmd===`${PREFIX}games`){ await this.send(chat, GAMES_MENU()); return; }
+
+            if(cmd===`${PREFIX}killall` || cmd===`${PREFIX}ancstop` || cmd===`${PREFIX}stoptxt`){
+                await this.hub.router.pushAll('kill_all',{chat},this.id); return;
+            }
+
+            // ── SPOTIFY TRACK DOWNLOADER API ──
+            if(body.toLowerCase().startsWith(`${PREFIX}spotify `)){
+                const url = body.slice(PREFIX.length + 8).trim();
+                if(!url) return;
+                await this.send(chat, `${TAG}\n\n🎧 Fetching Spotify Track via API... ⚡`);
+                try {
+                    const spotRes = await fetch(`https://delirius-api-oficial.vercel.app/download/spotify?url=${encodeURIComponent(url)}`);
+                    const spotJson = await spotRes.json();
+                    const dlUrl = spotJson?.data?.url || spotJson?.data?.download;
+                    if(!dlUrl) { await this.send(chat, `❌ Spotify download link unavailable!`); return; }
+                    const audioBuffer = Buffer.from(await (await fetch(dlUrl)).arrayBuffer());
+                    await this.socket.sendMessage(chat, { audio: audioBuffer, mimetype: 'audio/mp4', fileName: `spotify_track.mp4` });
+                } catch(e) { await this.send(chat, `❌ Spotify API error! Try again.`); }
+                return;
+            }
+
+            // ── MULTI-API AUDIO DOWNLOADER (VREDEN / DELIRIUS / JIOSAAVN) ──
+            if(body.toLowerCase().startsWith(`${PREFIX}song `) || body.toLowerCase().startsWith(`${PREFIX}play `)){
+                const isVoiceNote = body.toLowerCase().startsWith(`${PREFIX}play `);
+                const query = body.slice(isVoiceNote ? 6 : 6).trim();
+                if(!query) return;
+                await this.send(chat, `${TAG}\n\n🔍 Searching & Fetching audio: *${query}*... ⚡`);
+                try {
+                    let audioUrl = null;
+                    try {
+                        const res1 = await fetch(`https://api.vreden.web.id/api/ytmp3?url=https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`);
+                        const json1 = await res1.json();
+                        audioUrl = json1?.result?.download?.url || json1?.result?.url;
+                    } catch(e) {}
+                    if (!audioUrl) {
+                        try {
+                            const res2 = await fetch(`https://delirius-api-oficial.vercel.app/download/ytmp3?query=${encodeURIComponent(query)}`);
+                            const json2 = await res2.json();
+                            audioUrl = json2?.data?.download?.url || json2?.data?.url;
+                        } catch(e) {}
+                    }
+                    if (!audioUrl) {
+                        try {
+                            const res3 = await fetch(`https://saavnapi-nine.vercel.app/result/?query=${encodeURIComponent(query)}`);
+                            const json3 = await res3.json();
+                            const song = Array.isArray(json3) ? json3[0] : json3?.data?.[0];
+                            audioUrl = song?.media_url || song?.url;
+                        } catch(e) {}
+                    }
+                    if (!audioUrl) { await this.send(chat, `❌ Song not found on servers!`); return; }
+                    const audioBuffer = Buffer.from(await (await fetch(audioUrl)).arrayBuffer());
+                    if (isVoiceNote) {
+                        await this.socket.sendMessage(chat, { audio: audioBuffer, mimetype: 'audio/mp4', ptt: true });
+                    } else {
+                        await this.socket.sendMessage(chat, { audio: audioBuffer, mimetype: 'audio/mp4', fileName: `${query}.mp4` });
+                    }
+                } catch (e) { await this.send(chat, `❌ Error processing audio!`); }
+                return;
+            }
+
+            // ── MULTI-API VIDEO DOWNLOADER ──
+            if(body.toLowerCase().startsWith(`${PREFIX}video `)){
+                const query = body.slice(PREFIX.length + 6).trim();
+                if(!query) return;
+                await this.send(chat, `${TAG}\n\n📹 Searching & Fetching Video: *${query}*... ⚡`);
+                try {
+                    let videoUrl = null;
+                    try {
+                        const res1 = await fetch(`https://api.vreden.web.id/api/ytmp4?url=https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`);
+                        const json1 = await res1.json();
+                        videoUrl = json1?.result?.download?.url || json1?.result?.url;
+                    } catch(e) {}
+                    if (!videoUrl) {
+                        try {
+                            const res2 = await fetch(`https://delirius-api-oficial.vercel.app/download/ytmp4?query=${encodeURIComponent(query)}`);
+                            const json2 = await res2.json();
+                            videoUrl = json2?.data?.download?.url || json2?.data?.url;
+                        } catch(e) {}
+                    }
+                    if (!videoUrl) { await this.send(chat, `❌ Video not found!`); return; }
+                    const videoBuffer = Buffer.from(await (await fetch(videoUrl)).arrayBuffer());
+                    await this.socket.sendMessage(chat, { video: videoBuffer, caption: `🎥 *${query}*\n\n${TAG}`, mimetype: 'video/mp4' });
+                } catch (e) { await this.send(chat, `❌ Error processing video!`); }
+                return;
+            }
+
+            // ── TEXT SPAM (CONTINUOUS & NON-STOP) ──
+            if(body.toLowerCase().startsWith(`${PREFIX}txt `)){
+                const parts = body.slice(PREFIX.length+4).trim().split(' ');
+                const ms = parseInt(parts.pop()) || 10;
+                const txt = parts.join(' ');
+                await this.hub.router.push('txt_start', {chat, txt, ms}, this.id);
+                return;
+            }
+
+            // ── NAME CHANGE LOOPS (CONTINUOUS & NON-STOP) ──
+            for(const [key, setName] of Object.entries(SET_KEYS)){
+                if(body.toLowerCase().startsWith(`${PREFIX}${key} `)){
+                    const txt = body.slice(PREFIX.length+key.length+1).trim();
+                    if(!isGroup) return;
+                    await this.hub.router.pushAll('nc_start', {chat, txt: iFnt(txt), key, setName}, this.id);
+                    return;
+                }
+            }
+
+        } catch(e) {}
     }
 
-    if (
-        String(project.ownerId) !== String(ctx.from.id) &&
-        !isAdmin(ctx)
-    ) {
-        return ctx.reply("⛔ Access denied.");
+    async handle(cmd, payload, notify=true){
+        const {chat} = payload;
+        try{
+            switch(cmd){
+            case 'nc_start':{
+                const {txt, key, setName} = payload;
+                const emojis = SETS[setName] || SETS.faces;
+                const ms = timingMap[key] || 10;
+                const tid = `${chat}__nc_${key}`;
+                
+                this.nameLoops.set(tid, false);
+                await delay(100);
+                this.nameLoops.set(tid, true);
+                let i = 0;
+                
+                (async()=>{
+                    while(this.nameLoops.get(tid)){
+                        if(!this.socket || !this.online){ await delay(1000); continue; }
+                        const emo = emojis[i++ % emojis.length];
+                        try { await this.socket.groupUpdateSubject(chat, `${emo} ${txt} ${emo}`); } catch{}
+                        await delay(ms);
+                    }
+                })();
+                if(notify) await this.send(chat, win(`${key} name change loop`));
+                break;
+            }
+            case 'txt_start':{
+                const {txt, ms} = payload;
+                const txtKey = `${chat}__txt`;
+                
+                if(this.txtLoop.has(txtKey)){
+                    this.txtLoop.get(txtKey).on = false;
+                    await delay(100);
+                }
+                const loopControl = { on: true };
+                this.txtLoop.set(txtKey, loopControl);
+
+                (async()=>{
+                    while(loopControl.on){
+                        if(!this.socket || !this.online){ await delay(1000); continue; }
+                        try{ await this.socket.sendMessage(chat, {text: txt}); }catch{}
+                        await delay(ms);
+                    }
+                })();
+                if(notify) await this.send(chat, win(`text spam loop (${ms}ms)`));
+                break;
+            }
+            case 'kill_all':{
+                for(const [k] of this.nameLoops) { this.nameLoops.set(k, false); }
+                this.nameLoops.clear();
+                for(const [, v] of this.txtLoop) { v.on = false; }
+                this.txtLoop.clear();
+                if(notify) await this.send(chat, `${TAG}\n\n🛑 All active loops & spams killed successfully!`);
+                break;
+            }
+            }
+        }catch(e){}
     }
 
-    const message =
-        "📁 PROJECT DETAILS\n\n" +
-        `Name: ${project.filename}\n` +
-        `ID: ${project.id}\n` +
-        `Type: ${project.type}\n` +
-        `Status: ${projectStatus(project)}\n` +
-        `Size: ${(project.size / 1024).toFixed(2)} KB\n` +
-        `Created: ${project.createdAt}\n` +
-        `Startup: ${project.startupCommand || "Not detected"}`;
-
-    await ctx.editMessageText(
-        message,
-        Markup.inlineKeyboard([
-            [
-                Markup.button.callback("🛑 STOP PROJECT", `stopproj_${id}`),
-                Markup.button.callback("📜 LOGS", `projectlogs_${id}`)
-            ],
-            [
-                Markup.button.callback("⬅️ MY PROJECTS", "myprojects")
-            ]
-        ])
-    );
-});
-
-bot.action(/^stopproj_([a-f0-9]+)$/, async ctx => {
-    await ctx.answerCbQuery();
-    const id = ctx.match[1];
-
-    if (activeProcesses.has(id)) {
-        activeProcesses.get(id).kill();
-        activeProcesses.delete(id);
+    async send(jid, text){
+        if(!this.socket || !this.online) return;
+        try{ await this.socket.sendMessage(jid, {text}); }catch(e){}
     }
+}
 
-    if (db.projects[id]) {
-        db.projects[id].status = "STOPPED BY USER";
-        await saveDatabase();
+// ═════════════════════════════════════════════
+//  HUB INITIALIZATION
+// ═════════════════════════════════════════════
+class Hub {
+    constructor(){
+        this.sessions = new Map();
+        this.router   = new Router();
     }
+}
 
-    await ctx.editMessageText("🛑 Project process has been stopped.", backButton("myprojects"));
-});
+const hub = new Hub();
 
-bot.action(/^projectlogs_([a-f0-9]+)$/, async ctx => {
-    await ctx.answerCbQuery();
-
-    const project = db.projects[ctx.match[1]];
-
-    if (!project) return ctx.reply("Project not found.");
-
-    if (
-        String(project.ownerId) !== String(ctx.from.id) &&
-        !isAdmin(ctx)
-    ) {
-        return ctx.reply("⛔ Access denied.");
-    }
-
-    const logs = (project.logs || [])
-        .slice(-10)
-        .map(log => `${log.time}\n${log.message}`)
-        .join("\n\n");
-
-    await ctx.reply(
-        "📜 PROJECT LOGS\n\n" + (logs || "No logs available.")
-    );
-});
-
-// =================================================
-// ADMIN PANEL
-// =================================================
-
-bot.command("admin", async ctx => {
-    if (!isAdmin(ctx)) {
-        return ctx.reply("⛔ ADMIN ACCESS DENIED.");
-    }
-
-    await ctx.reply(
-        "👑 SMW DEVELOPER CONTROL PANEL\n\nSelect a control:",
-        adminMenu()
-    );
-});
-
-bot.action("admin", async ctx => {
-    await ctx.answerCbQuery();
-
-    if (!isAdmin(ctx)) {
-        return ctx.reply("⛔ ADMIN ACCESS DENIED.");
-    }
-
-    await ctx.editMessageText(
-        "👑 SMW DEVELOPER CONTROL PANEL\n\nSelect a control:",
-        adminMenu()
-    );
-});
-
-bot.action("admin_stats", async ctx => {
-    await ctx.answerCbQuery();
-
-    if (!isAdmin(ctx)) return ctx.reply("⛔ Access denied.");
-
-    const users = Object.keys(db.users).length;
-    const projects = Object.keys(db.projects).length;
-
-    await ctx.editMessageText(
-        "📊 MASTER STATISTICS\n\n" +
-        `👥 Total Users: ${users}\n` +
-        `📁 Total Projects: ${projects}\n` +
-        `📤 Total Uploads: ${db.executions}\n` +
-        `🚀 Active Processes: ${activeProcesses.size}\n` +
-        `🖥 Server Platform: ${process.platform}\n` +
-        `🟢 Bot Ready: ${botReady ? "YES" : "NO"}\n` +
-        `⏱ Uptime: ${Math.floor(process.uptime())} seconds`,
-        backButton("admin")
-    );
-});
-
-bot.action("admin_status", async ctx => {
-    await ctx.answerCbQuery();
-
-    if (!isAdmin(ctx)) return ctx.reply("⛔ Access denied.");
-
-    const memory = process.memoryUsage();
-
-    await ctx.editMessageText(
-        "🖥 SERVICE STATUS\n\n" +
-        `Bot: ${botReady ? "ONLINE" : "STARTING"}\n` +
-        `Node: ${process.version}\n` +
-        `Platform: ${process.platform}\n` +
-        `CPU Cores: ${os.cpus().length}\n` +
-        `System RAM: ${(os.totalmem() / 1024 / 1024).toFixed(0)} MB\n` +
-        `Free RAM: ${(os.freemem() / 1024 / 1024).toFixed(0)} MB\n` +
-        `Process RAM: ${(memory.rss / 1024 / 1024).toFixed(2)} MB\n` +
-        `Process Uptime: ${Math.floor(process.uptime())} seconds`,
-        backButton("admin")
-    );
-});
-
-bot.action("admin_users", async ctx => {
-    await ctx.answerCbQuery();
-
-    if (!isAdmin(ctx)) return ctx.reply("⛔ Access denied.");
-
-    const users = Object.values(db.users);
-
-    const list = users.slice(0, 30).map(user =>
-        `👤 ${user.firstName || "User"}\n` +
-        `ID: ${user.id}\n` +
-        `Username: @${user.username || "none"}`
-    ).join("\n\n");
-
-    await ctx.editMessageText(
-        "👥 REGISTERED USERS\n\n" +
-        (list || "No users registered."),
-        backButton("admin")
-    );
-});
-
-bot.action("admin_projects", async ctx => {
-    await ctx.answerCbQuery();
-
-    if (!isAdmin(ctx)) return ctx.reply("⛔ Access denied.");
-
-    const projects = Object.values(db.projects);
-
-    const list = projects.slice(0, 30).map(project =>
-        `📁 ${project.filename}\n` +
-        `ID: ${project.id}\n` +
-        `Owner: ${project.ownerId}\n` +
-        `Status: ${project.status}`
-    ).join("\n\n");
-
-    await ctx.editMessageText(
-        "📁 ALL PROJECTS\n\n" +
-        (list || "No projects available."),
-        backButton("admin")
-    );
-});
-
-bot.action("admin_logs", async ctx => {
-    await ctx.answerCbQuery();
-
-    if (!isAdmin(ctx)) return ctx.reply("⛔ Access denied.");
-
-    const logs = crashLogs.slice(0, 10)
-        .map(log => `${log.time}\n${log.message}`)
-        .join("\n\n");
-
-    await ctx.editMessageText(
-        "📜 CRASH LOGS\n\n" +
-        (logs || "No crash logs recorded."),
-        backButton("admin")
-    );
-});
-
-// =================================================
-// COMMANDS
-// =================================================
-
-bot.command("help", async ctx => {
-    await ctx.reply(
-        "SMW HOSTING COMMANDS\n\n" +
-        "/start - Open main menu\n" +
-        "/help - Help center\n" +
-        "/admin - Developer panel\n" +
-        "/status - Bot status\n" +
-        "/projects - Your projects"
-    );
-});
-
-bot.command("status", async ctx => {
-    await ctx.reply(
-        `SMW HOSTING: ${botReady ? "ONLINE" : "STARTING"}\n` +
-        `Uptime: ${Math.floor(process.uptime())} seconds`
-    );
-});
-
-bot.command("projects", async ctx => {
-    const projects = userProjects(ctx.from.id);
-
-    await ctx.reply(
-        "YOUR PROJECTS\n\n" +
-        (projects.map(p => `${p.filename} — ${p.status}`).join("\n") ||
-            "No projects yet.")
-    );
-});
-
-// =================================================
-// WEB SERVER
-// =================================================
-
-app.get("/", (req, res) => {
-    res.status(200).send(
-        "🎀 SMW HOSTING 🚩 — Telegram Hosting Management Bot"
-    );
-});
-
-app.get("/health", (req, res) => {
-    res.status(200).json({
-        status: "online",
-        service: "SMW HOSTING",
-        botReady,
-        uptime: process.uptime(),
-        timestamp: new Date().toISOString()
+// ─────────────────────────────────────────────
+//  EXPRESS API BRIDGE (FOR 3D CONTROL APP)
+// ─────────────────────────────────────────────
+app.get('/api/status', (req, res) => {
+    const primary = hub.router.getPrimary();
+    res.json({
+        online: !!primary,
+        botId: primary ? primary.id : null,
+        phone: primary ? primary.phone : null
     });
 });
 
-// =================================================
-// RENDER SELF PING — PRESERVED
-// =================================================
-
-const SELF_URL =
-    process.env.RENDER_EXTERNAL_URL ||
-    `http://localhost:${PORT}`;
-
-setInterval(async () => {
+app.post('/api/pair', async (req, res) => {
     try {
-        await axios.get(`${SELF_URL}/health`, {
-            timeout: 15000
+        const { phone } = req.body;
+        if (!phone) return res.status(400).json({ error: 'Phone number required' });
+        const cleanPhone = phone.replace(/[^0-9]/g, '');
+
+        const newSession = new Session(cleanPhone, cleanPhone, hub);
+        hub.sessions.set(cleanPhone, newSession);
+        hub.router.attach(cleanPhone, newSession);
+
+        await newSession.init((code, err) => {
+            if (err) return res.status(500).json({ error: err });
+            res.json({ success: true, pairingCode: code, phone: cleanPhone });
         });
-    } catch (error) {
-        console.error("SMW self-ping error:", error.message);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
     }
-}, 9 * 60 * 1000);
-
-// =================================================
-// ERROR HANDLING
-// =================================================
-
-bot.catch((error, ctx) => {
-    logError(error);
-    console.error("Telegram update error:", ctx?.update?.update_id);
 });
 
-process.on("unhandledRejection", reason => {
-    logError(reason);
+app.post('/api/stop-all', async (req, res) => {
+    await hub.router.pushAll('kill_all', { chat: 'system' }, 'api');
+    res.json({ success: true, message: 'All loops stopped.' });
 });
 
-process.on("uncaughtException", error => {
-    logError(error);
+// 24/7 Keep-Alive Auto-Ping (Render Fix)
+app.listen(PORT, () => {
+    console.log(`\n👑 SMW iOS MANAGER v10 STARTED (Dev: SHIVAM)`);
+    console.log(`🌐 Express API Bridge running on port ${PORT}\n`);
+    
+    setInterval(() => {
+        const renderUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+        http.get(`${renderUrl}/api/status`, () => {}).on('error', () => {});
+    }, 4 * 60 * 1000);
 });
-
-// =================================================
-// START SERVER + BOT
-// =================================================
-
-app.listen(PORT, "0.0.0.0", () => {
-    console.log(`SMW HOSTING web server running on ${PORT}`);
-});
-
-(async () => {
-    try {
-        await bot.launch();
-        botReady = true;
-        botStartedAt = Date.now();
-
-        console.log("SMW HOSTING Telegram bot is online.");
-    } catch (error) {
-        botReady = false;
-        logError(error);
-        process.exit(1);
-    }
-})();
-
-async function shutdown(signal) {
-    console.log(`Received ${signal}. Shutting down...`);
-
-    botReady = false;
-
-    try {
-        bot.stop(signal);
-    } catch (error) {
-        logError(error);
-    }
-
-    await saveDatabase();
-
-    process.exit(0);
-}
-
-process.once("SIGINT", () => shutdown("SIGINT"));
-process.once("SIGTERM", () => shutdown("SIGTERM"));
